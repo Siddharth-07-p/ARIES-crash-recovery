@@ -15,7 +15,7 @@ class Frame:
         is_dirty: Whether the resident page was modified in memory and differs from disk.
     """
 
-    __slots__ = ("_frame_id", "_page_id", "_page", "_pin_count", "_is_dirty")
+    __slots__ = ("_frame_id", "_page_id", "_page", "_pin_count", "_is_dirty", "_page_lsn")
 
     def __init__(self, frame_id: int) -> None:
         """Initialize an empty buffer frame."""
@@ -24,6 +24,7 @@ class Frame:
         self._page: Optional[Page] = None
         self._pin_count: int = 0
         self._is_dirty: bool = False
+        self._page_lsn: int = 0
 
     @property
     def frame_id(self) -> int:
@@ -40,6 +41,17 @@ class Frame:
         """Return the resident Page object, or None if empty."""
         return self._page
 
+    @property
+    def page_lsn(self) -> int:
+        """Return the latest LSN associated with updates to this resident page."""
+        return self._page_lsn
+
+    @page_lsn.setter
+    def page_lsn(self, lsn: int) -> None:
+        """Set the page LSN."""
+        if not isinstance(lsn, int) or isinstance(lsn, bool) or lsn < 0:
+            raise ValueError(f"page_lsn must be a non-negative integer, got {lsn!r}")
+        self._page_lsn = lsn
 
     @property
     def pin_count(self) -> int:
@@ -79,6 +91,7 @@ class Frame:
         page: Page,
         pin_count: int = 1,
         is_dirty: bool = False,
+        page_lsn: int = 0,
     ) -> None:
         """Populate this frame with a new resident page.
 
@@ -87,11 +100,13 @@ class Frame:
             page: In-memory Page instance.
             pin_count: Initial pin count (default 1 for newly fetched pages).
             is_dirty: Initial dirty status (default False).
+            page_lsn: Initial page LSN (default 0).
         """
         self._page_id = page_id
         self._page = page
         self._pin_count = max(0, pin_count)
         self._is_dirty = is_dirty
+        self._page_lsn = max(0, page_lsn)
 
     def pin(self) -> int:
         """Increment pin count by 1.
@@ -129,10 +144,11 @@ class Frame:
         self._page = None
         self._pin_count = 0
         self._is_dirty = False
+        self._page_lsn = 0
 
     def __repr__(self) -> str:
         """String representation of the buffer frame."""
         return (
             f"Frame(id={self._frame_id}, page_id={self._page_id}, "
-            f"pin_count={self._pin_count}, dirty={self._is_dirty})"
+            f"pin_count={self._pin_count}, dirty={self._is_dirty}, page_lsn={self._page_lsn})"
         )

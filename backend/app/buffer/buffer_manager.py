@@ -1,6 +1,6 @@
 """BufferManager managing in-memory cached database pages above DiskManager."""
 
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from app.buffer.constants import DEFAULT_BUFFER_POOL_SIZE
 from app.buffer.exceptions import (
     BufferManagerClosedError,
@@ -26,12 +26,14 @@ class BufferManager:
         self,
         disk_manager: DiskManager,
         pool_size: int = DEFAULT_BUFFER_POOL_SIZE,
+        log_manager: Optional[Any] = None,
     ) -> None:
-        """Initialize BufferManager with an underlying DiskManager and buffer pool size.
+        """Initialize BufferManager with an underlying DiskManager, buffer pool size, and optional LogManager.
 
         Args:
             disk_manager: DiskManager instance for physical page I/O.
             pool_size: Maximum number of pages held in memory simultaneously.
+            log_manager: Optional LogManager instance for WAL-before-flush enforcement.
 
         Raises:
             ValueError: If pool_size is not a positive integer.
@@ -41,6 +43,7 @@ class BufferManager:
 
         self._disk_manager: DiskManager = disk_manager
         self._pool_size: int = pool_size
+        self._log_manager: Optional[Any] = log_manager
         self._frames: List[Frame] = [Frame(frame_id=i) for i in range(pool_size)]
         self._page_table: Dict[int, int] = {}  # page_id -> frame_id
         self._free_frames: List[int] = list(range(pool_size))
@@ -51,6 +54,11 @@ class BufferManager:
     def disk_manager(self) -> DiskManager:
         """Return the underlying DiskManager."""
         return self._disk_manager
+
+    @property
+    def log_manager(self) -> Optional[Any]:
+        """Return the optional LogManager."""
+        return self._log_manager
 
     @property
     def pool_size(self) -> int:
@@ -70,6 +78,15 @@ class BufferManager:
         """
         if self.is_closed:
             raise BufferManagerClosedError("BufferManager is closed. No operations permitted.")
+
+    def _ensure_wal_flushed_for_frame(self, frame: Frame) -> None:
+        """Ensure WAL records up to frame.page_lsn are durable before writing page to disk.
+
+        Args:
+            frame: Buffer frame containing page to be written.
+        """
+        if self._log_manager is not None and frame.page_lsn > 0:
+            self._log_manager.flush_to_lsn(frame.page_lsn)
 
     def fetch_page(self, page_id: int) -> Page:
         """Fetch a page into the buffer pool and increment its pin count.
@@ -124,8 +141,9 @@ class BufferManager:
             frame_id = victim_frame_id
             frame = self._frames[frame_id]
 
-            # If victim is dirty, flush it to disk before replacing
+            # If victim is dirty, ensure WAL is durable through page_lsn before replacing
             if frame.is_dirty and frame.page is not None and frame.page_id is not None:
+                self._ensure_wal_flushed_for_frame(frame)
                 self._disk_manager.write_page(frame.page_id, frame.page)
                 self._disk_manager.flush()
 
@@ -196,6 +214,8 @@ class BufferManager:
     def flush_page(self, page_id: int) -> None:
         """Write a resident dirty page to disk and mark it clean.
 
+        Enforces WAL durability through page_lsn before writing to disk.
+
         Args:
             page_id: Page ID to flush.
 
@@ -220,20 +240,60 @@ class BufferManager:
         frame = self._frames[frame_id]
 
         if frame.page is not None and frame.page_id is not None:
-            self._disk_manager.write_page(frame.page_id, frame.page)
-            self._disk_manager.flush()
-            frame.is_dirty = False
+            if frame.is_dirty:
+                self._ensure_wal_flushed_for_frame(frame)
+                self._disk_manager.write_page(frame.page_id, frame.page)
+                self._disk_manager.flush()
+                frame.is_dirty = False
 
     def flush_all_pages(self) -> None:
-        """Flush all resident dirty pages to disk and mark them clean."""
+        """Flush all resident dirty pages to disk and mark them clean.
+
+        Enforces WAL durability through each page's page_lsn before disk write.
+        """
         self._check_open()
 
         for frame in self._frames:
             if not frame.is_empty and frame.is_dirty and frame.page is not None and frame.page_id is not None:
+                self._ensure_wal_flushed_for_frame(frame)
                 self._disk_manager.write_page(frame.page_id, frame.page)
                 frame.is_dirty = False
 
         self._disk_manager.flush()
+
+    def get_page_lsn(self, page_id: int) -> int:
+        """Return the page_lsn associated with a resident page frame.
+
+        Args:
+            page_id: Target page ID.
+
+        Returns:
+            Integer LSN (0 if unset or clean).
+
+        Raises:
+            PageNotResidentError: If page is not in the buffer pool.
+        """
+        self._check_open()
+        if page_id not in self._page_table:
+            raise PageNotResidentError(f"Page {page_id} is not resident in buffer pool.")
+        return self._frames[self._page_table[page_id]].page_lsn
+
+    def set_page_lsn(self, page_id: int, page_lsn: int) -> None:
+        """Associate an LSN with a resident page frame and mark it dirty.
+
+        Args:
+            page_id: Target page ID.
+            page_lsn: LSN of the log record describing the page modification.
+
+        Raises:
+            PageNotResidentError: If page is not in the buffer pool.
+            ValueError: If page_lsn is invalid.
+        """
+        self._check_open()
+        if page_id not in self._page_table:
+            raise PageNotResidentError(f"Page {page_id} is not resident in buffer pool.")
+        frame = self._frames[self._page_table[page_id]]
+        frame.page_lsn = page_lsn
 
     def is_dirty(self, page_id: int) -> bool:
         """Check whether a resident page is dirty.

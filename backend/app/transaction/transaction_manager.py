@@ -1,6 +1,6 @@
 """TransactionManager managing in-memory active transaction state and lifecycle."""
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from app.transaction.exceptions import (
     InvalidTransactionStateError,
     TransactionManagerClosedError,
@@ -12,11 +12,21 @@ from app.transaction.transaction import Transaction, TransactionState
 class TransactionManager:
     """Manages active transaction lifecycles, states, and the in-memory transaction table."""
 
-    def __init__(self) -> None:
-        """Initialize TransactionManager with an empty transaction table."""
+    def __init__(self, log_manager: Optional[Any] = None) -> None:
+        """Initialize TransactionManager with an empty transaction table and optional LogManager.
+
+        Args:
+            log_manager: Optional LogManager instance for WAL logging.
+        """
         self._next_tx_id: int = 1
         self._transactions: Dict[int, Transaction] = {}
+        self._log_manager: Optional[Any] = log_manager
         self._is_closed: bool = False
+
+    @property
+    def log_manager(self) -> Optional[Any]:
+        """Return the optional LogManager."""
+        return self._log_manager
 
     @property
     def is_closed(self) -> bool:
@@ -35,7 +45,7 @@ class TransactionManager:
             )
 
     def begin_transaction(self) -> Transaction:
-        """Begin a new database transaction in RUNNING state.
+        """Begin a new database transaction in RUNNING state and log BEGIN record.
 
         Returns:
             The newly created Transaction instance.
@@ -50,10 +60,14 @@ class TransactionManager:
 
         tx = Transaction(transaction_id=tx_id, state=TransactionState.RUNNING)
         self._transactions[tx_id] = tx
+
+        if self._log_manager is not None:
+            self._log_manager.append_begin(tx_id)
+
         return tx
 
     def commit_transaction(self, transaction_id: int) -> Transaction:
-        """Commit an active transaction, transitioning its state to COMMITTED.
+        """Commit an active transaction, ensuring COMMIT record is durable before returning.
 
         Args:
             transaction_id: Unique integer identifier of the transaction.
@@ -79,13 +93,23 @@ class TransactionManager:
             )
 
         tx = self._transactions[transaction_id]
+
+        if not tx.is_running:
+            raise InvalidTransactionStateError(
+                f"Cannot commit transaction {transaction_id}: current state is {tx.state.value}, expected RUNNING."
+            )
+
+        if self._log_manager is not None:
+            self._log_manager.append_commit(transaction_id)
+            self._log_manager.flush()
+
         tx.commit()
         return tx
 
     def abort_transaction(self, transaction_id: int) -> Transaction:
-        """Abort an active transaction, transitioning its state to ABORTED.
+        """Abort an active transaction, ensuring ABORT record is durable before returning.
 
-        Note: Physical rollback is not performed in Phase 3.
+        Note: Physical rollback is not performed in Phase 3/4 (future ARIES Undo).
 
         Args:
             transaction_id: Unique integer identifier of the transaction.
@@ -111,6 +135,16 @@ class TransactionManager:
             )
 
         tx = self._transactions[transaction_id]
+
+        if not tx.is_running:
+            raise InvalidTransactionStateError(
+                f"Cannot abort transaction {transaction_id}: current state is {tx.state.value}, expected RUNNING."
+            )
+
+        if self._log_manager is not None:
+            self._log_manager.append_abort(transaction_id)
+            self._log_manager.flush()
+
         tx.abort()
         return tx
 
