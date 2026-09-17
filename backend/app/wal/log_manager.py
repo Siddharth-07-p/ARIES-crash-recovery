@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 
+from app.fault.constants import FaultPoint
+from app.fault.fault_injector import fault_injector
 from app.wal.constants import DEFAULT_WAL_PATH
 from app.wal.exceptions import (
     InvalidLSNError,
@@ -140,6 +142,7 @@ class LogManager:
         try:
             self._file.seek(0, os.SEEK_END)
             self._file.write(serialized)
+            self._file.flush()
         except OSError as exc:
             raise WALFlushError(f"Failed writing to WAL file: {exc}") from exc
 
@@ -149,6 +152,9 @@ class LogManager:
 
         allocated_lsn = self._next_lsn
         self._next_lsn += 1
+
+        if record.record_type == LogRecordType.UPDATE:
+            fault_injector.trigger(FaultPoint.AFTER_LOG_APPEND_BEFORE_WAL_FLUSH)
 
         if self._auto_flush:
             self.flush()

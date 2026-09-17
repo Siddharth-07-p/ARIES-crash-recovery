@@ -11,6 +11,8 @@ from app.checkpoint.exceptions import (
     CheckpointManagerClosedError,
     InvalidCheckpointError,
 )
+from app.fault.constants import FaultPoint
+from app.fault.fault_injector import fault_injector
 from app.wal.log_record import LogRecord, LogRecordType
 
 if TYPE_CHECKING:
@@ -132,6 +134,7 @@ class CheckpointManager:
 
         # 4. Append CHECKPOINT_BEGIN record
         begin_lsn = self._log_manager.append_checkpoint_begin()
+        fault_injector.trigger(FaultPoint.CHECKPOINT_BEGIN)
 
         # 5. Serialize snapshot and append CHECKPOINT_END record
         payload = snapshot.serialize()
@@ -142,6 +145,7 @@ class CheckpointManager:
 
         # 6. Flush WAL to guarantee durability
         self._log_manager.flush()
+        fault_injector.trigger(FaultPoint.CHECKPOINT_END)
 
         checkpoint_info = CheckpointInfo(
             begin_lsn=begin_lsn,

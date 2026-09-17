@@ -1,6 +1,6 @@
-"""TransactionManager managing in-memory active transaction state and lifecycle."""
-
 from typing import Any, Dict, List, Optional
+from app.fault.constants import FaultPoint
+from app.fault.fault_injector import fault_injector
 from app.transaction.exceptions import (
     InvalidTransactionStateError,
     TransactionManagerClosedError,
@@ -103,6 +103,8 @@ class TransactionManager:
             self._log_manager.append_commit(transaction_id)
             self._log_manager.flush()
 
+        fault_injector.trigger(FaultPoint.DURING_TRANSACTION_COMMIT)
+
         tx.commit()
         return tx
 
@@ -144,6 +146,8 @@ class TransactionManager:
         if self._log_manager is not None:
             self._log_manager.append_abort(transaction_id)
             self._log_manager.flush()
+
+        fault_injector.trigger(FaultPoint.DURING_TRANSACTION_ABORT)
 
         tx.abort()
         return tx

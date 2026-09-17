@@ -13,6 +13,8 @@ from app.buffer.exceptions import (
 from app.buffer.frame import Frame
 from app.buffer.replacer import LRUReplacer
 from app.checkpoint.dirty_page_table import DirtyPageTable
+from app.fault.constants import FaultPoint
+from app.fault.fault_injector import fault_injector
 from app.storage.disk_manager import DiskManager
 from app.storage.exceptions import InvalidPageIdError
 from app.storage.page import Page
@@ -162,6 +164,7 @@ class BufferManager:
             # If victim is dirty, ensure WAL is durable through page_lsn before replacing
             if frame.is_dirty and frame.page is not None and frame.page_id is not None:
                 self._ensure_wal_flushed_for_frame(frame)
+                fault_injector.trigger(FaultPoint.AFTER_WAL_FLUSH_BEFORE_PAGE_FLUSH)
                 self._disk_manager.write_page(frame.page_id, frame.page)
                 self._disk_manager.flush()
                 self._dirty_page_table.clean_page(frame.page_id)
@@ -264,6 +267,7 @@ class BufferManager:
         if frame.page is not None and frame.page_id is not None:
             if frame.is_dirty:
                 self._ensure_wal_flushed_for_frame(frame)
+                fault_injector.trigger(FaultPoint.AFTER_WAL_FLUSH_BEFORE_PAGE_FLUSH)
                 self._disk_manager.write_page(frame.page_id, frame.page)
                 self._disk_manager.flush()
                 frame.is_dirty = False
@@ -279,6 +283,7 @@ class BufferManager:
         for frame in self._frames:
             if not frame.is_empty and frame.is_dirty and frame.page is not None and frame.page_id is not None:
                 self._ensure_wal_flushed_for_frame(frame)
+                fault_injector.trigger(FaultPoint.AFTER_WAL_FLUSH_BEFORE_PAGE_FLUSH)
                 self._disk_manager.write_page(frame.page_id, frame.page)
                 frame.is_dirty = False
                 self._dirty_page_table.clean_page(frame.page_id)
