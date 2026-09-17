@@ -249,6 +249,47 @@ class LogManager:
         )
         return self.append_log(record)
 
+    def append_checkpoint_begin(self) -> int:
+        """Append a CHECKPOINT_BEGIN log record.
+
+        Returns:
+            The allocated LSN.
+        """
+        self._check_open()
+        lsn = self._next_lsn
+        record = LogRecord(
+            lsn=lsn,
+            record_type=LogRecordType.CHECKPOINT_BEGIN,
+        )
+        return self.append_log(record)
+
+    def append_checkpoint_end(
+        self,
+        checkpoint_begin_lsn: int,
+        payload: Optional[Union[bytes, bytearray, memoryview]] = None,
+    ) -> int:
+        """Append a CHECKPOINT_END log record referencing the begin LSN and containing snapshot payload.
+
+        Args:
+            checkpoint_begin_lsn: LSN of the corresponding CHECKPOINT_BEGIN record.
+            payload: Deterministic binary serialization of the checkpoint snapshot.
+
+        Returns:
+            The allocated LSN.
+        """
+        self._check_open()
+        if not isinstance(checkpoint_begin_lsn, int) or isinstance(checkpoint_begin_lsn, bool) or checkpoint_begin_lsn <= 0:
+            raise InvalidLSNError(f"checkpoint_begin_lsn must be a positive integer, got {checkpoint_begin_lsn!r}")
+
+        lsn = self._next_lsn
+        record = LogRecord(
+            lsn=lsn,
+            record_type=LogRecordType.CHECKPOINT_END,
+            prev_lsn=checkpoint_begin_lsn,
+            checkpoint_payload=payload,
+        )
+        return self.append_log(record)
+
     def flush(self) -> int:
         """Flush Python file buffers and execute os.fsync to ensure WAL durability.
 

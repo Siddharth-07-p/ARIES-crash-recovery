@@ -10,6 +10,8 @@ from app.wal.constants import (
     MIN_RECORD_SIZE,
     TYPE_CODE_ABORT,
     TYPE_CODE_BEGIN,
+    TYPE_CODE_CHECKPOINT_BEGIN,
+    TYPE_CODE_CHECKPOINT_END,
     TYPE_CODE_COMMIT,
     TYPE_CODE_UPDATE,
     WAL_RECORD_MAGIC,
@@ -24,6 +26,8 @@ class LogRecordType(str, Enum):
     COMMIT = "COMMIT"
     ABORT = "ABORT"
     UPDATE = "UPDATE"
+    CHECKPOINT_BEGIN = "CHECKPOINT_BEGIN"
+    CHECKPOINT_END = "CHECKPOINT_END"
 
 
 _TYPE_TO_CODE = {
@@ -31,6 +35,8 @@ _TYPE_TO_CODE = {
     LogRecordType.COMMIT: TYPE_CODE_COMMIT,
     LogRecordType.ABORT: TYPE_CODE_ABORT,
     LogRecordType.UPDATE: TYPE_CODE_UPDATE,
+    LogRecordType.CHECKPOINT_BEGIN: TYPE_CODE_CHECKPOINT_BEGIN,
+    LogRecordType.CHECKPOINT_END: TYPE_CODE_CHECKPOINT_END,
 }
 
 _CODE_TO_TYPE = {
@@ -38,6 +44,8 @@ _CODE_TO_TYPE = {
     TYPE_CODE_COMMIT: LogRecordType.COMMIT,
     TYPE_CODE_ABORT: LogRecordType.ABORT,
     TYPE_CODE_UPDATE: LogRecordType.UPDATE,
+    TYPE_CODE_CHECKPOINT_BEGIN: LogRecordType.CHECKPOINT_BEGIN,
+    TYPE_CODE_CHECKPOINT_END: LogRecordType.CHECKPOINT_END,
 }
 
 
@@ -46,13 +54,14 @@ class LogRecord:
 
     Attributes:
         lsn: Unique Log Sequence Number (positive integer).
-        record_type: Type of log entry (BEGIN, COMMIT, ABORT, UPDATE).
+        record_type: Type of log entry (BEGIN, COMMIT, ABORT, UPDATE, CHECKPOINT_BEGIN, CHECKPOINT_END).
         transaction_id: Transaction identifier associated with this record.
-        prev_lsn: LSN of the preceding record for the same transaction (or None).
+        prev_lsn: LSN of the preceding record for the same transaction or begin LSN for checkpoint (or None).
         page_id: Target page ID for UPDATE records.
         offset: Byte offset within the page for UPDATE records.
         before_image: State of modified bytes before update (for UNDO).
         after_image: State of modified bytes after update (for REDO).
+        checkpoint_payload: Serialized payload data for CHECKPOINT_END records.
     """
 
     __slots__ = (
@@ -64,6 +73,7 @@ class LogRecord:
         "_offset",
         "_before_image",
         "_after_image",
+        "_checkpoint_payload",
     )
 
     def __init__(
@@ -76,6 +86,7 @@ class LogRecord:
         offset: Optional[int] = None,
         before_image: Optional[Union[bytes, bytearray, memoryview]] = None,
         after_image: Optional[Union[bytes, bytearray, memoryview]] = None,
+        checkpoint_payload: Optional[Union[bytes, bytearray, memoryview]] = None,
     ) -> None:
         """Initialize and validate a LogRecord instance."""
         if not isinstance(lsn, int) or isinstance(lsn, bool) or lsn <= 0:
@@ -138,11 +149,19 @@ class LogRecord:
             self._offset: Optional[int] = offset
             self._before_image: Optional[bytes] = before_bytes
             self._after_image: Optional[bytes] = after_bytes
+            self._checkpoint_payload: Optional[bytes] = None
+        elif record_type == LogRecordType.CHECKPOINT_END:
+            self._page_id = None
+            self._offset = None
+            self._before_image = None
+            self._after_image = None
+            self._checkpoint_payload = bytes(checkpoint_payload) if checkpoint_payload is not None else b""
         else:
             self._page_id = None
             self._offset = None
             self._before_image = None
             self._after_image = None
+            self._checkpoint_payload = None
 
         self._lsn: int = lsn
         self._record_type: LogRecordType = record_type
@@ -166,8 +185,20 @@ class LogRecord:
 
     @property
     def prev_lsn(self) -> Optional[int]:
-        """Return the previous LSN for this transaction."""
+        """Return the previous LSN for this transaction (or begin LSN for checkpoint)."""
         return self._prev_lsn
+
+    @property
+    def checkpoint_begin_lsn(self) -> Optional[int]:
+        """Return the begin LSN for CHECKPOINT_END records."""
+        if self._record_type == LogRecordType.CHECKPOINT_END:
+            return self._prev_lsn
+        return None
+
+    @property
+    def checkpoint_payload(self) -> Optional[bytes]:
+        """Return the serialized checkpoint payload for CHECKPOINT_END records."""
+        return self._checkpoint_payload
 
     @property
     def page_id(self) -> Optional[int]:
@@ -208,6 +239,8 @@ class LogRecord:
                     - before_image (before_len bytes)
                     - after_len (4 bytes, uint32)
                     - after_image (after_len bytes)
+                For CHECKPOINT_END:
+                    - checkpoint_payload (variable bytes)
             - Trailer (4 bytes):
                 - crc32 (4 bytes, uint32) over all bytes prior to crc32
 
@@ -234,6 +267,9 @@ class LogRecord:
             )
             payload += self._before_image
             payload += self._after_image
+        elif self._record_type == LogRecordType.CHECKPOINT_END:
+            if self._checkpoint_payload:
+                payload += self._checkpoint_payload
 
         # Header without total_length (8 bytes: lsn, 8 bytes: prev_lsn, 8 bytes: tx_id, 1 byte: type) = 25 bytes
         # Plus 4 bytes magic + 4 bytes total_length = 33 bytes header
@@ -339,6 +375,20 @@ class LogRecord:
                 )
             except InvalidLogRecordError as exc:
                 raise LogCorruptionError(f"Invalid record data within WAL: {exc}") from exc
+        elif record_type == LogRecordType.CHECKPOINT_END:
+            payload_offset = offset + 33
+            payload_len = total_length - 33 - 4
+            checkpoint_payload = data[payload_offset : payload_offset + payload_len]
+            try:
+                record = cls(
+                    lsn=lsn,
+                    record_type=record_type,
+                    transaction_id=tx_id,
+                    prev_lsn=prev_lsn,
+                    checkpoint_payload=checkpoint_payload,
+                )
+            except InvalidLogRecordError as exc:
+                raise LogCorruptionError(f"Invalid record data within WAL: {exc}") from exc
         else:
             try:
                 record = cls(
@@ -367,6 +417,11 @@ class LogRecord:
                 "before_image_len": len(self._before_image) if self._before_image else 0,
                 "after_image_len": len(self._after_image) if self._after_image else 0,
             })
+        elif self._record_type == LogRecordType.CHECKPOINT_END:
+            result.update({
+                "checkpoint_begin_lsn": self._prev_lsn,
+                "payload_len": len(self._checkpoint_payload) if self._checkpoint_payload else 0,
+            })
         return result
 
     def __eq__(self, other: object) -> bool:
@@ -382,6 +437,7 @@ class LogRecord:
             and self._offset == other._offset
             and self._before_image == other._before_image
             and self._after_image == other._after_image
+            and self._checkpoint_payload == other._checkpoint_payload
         )
 
     def __repr__(self) -> str:
@@ -392,7 +448,16 @@ class LogRecord:
                 f"TX={self._transaction_id}, PREV_LSN={self._prev_lsn}, "
                 f"page_id={self._page_id}, offset={self._offset})"
             )
+        if self._record_type == LogRecordType.CHECKPOINT_END:
+            return (
+                f"LogRecord(LSN={self._lsn}, TYPE={self._record_type.value}, "
+                f"CHECKPOINT_BEGIN_LSN={self._prev_lsn}, "
+                f"payload_len={len(self._checkpoint_payload) if self._checkpoint_payload else 0})"
+            )
+        if self._record_type == LogRecordType.CHECKPOINT_BEGIN:
+            return f"LogRecord(LSN={self._lsn}, TYPE={self._record_type.value})"
         return (
             f"LogRecord(LSN={self._lsn}, TYPE={self._record_type.value}, "
             f"TX={self._transaction_id}, PREV_LSN={self._prev_lsn})"
         )
+

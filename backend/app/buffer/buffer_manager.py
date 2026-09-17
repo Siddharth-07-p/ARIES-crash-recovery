@@ -1,5 +1,7 @@
 """BufferManager managing in-memory cached database pages above DiskManager."""
 
+from __future__ import annotations
+
 from typing import Any, Dict, List, Optional, Union
 from app.buffer.constants import DEFAULT_BUFFER_POOL_SIZE
 from app.buffer.exceptions import (
@@ -10,6 +12,7 @@ from app.buffer.exceptions import (
 )
 from app.buffer.frame import Frame
 from app.buffer.replacer import LRUReplacer
+from app.checkpoint.dirty_page_table import DirtyPageTable
 from app.storage.disk_manager import DiskManager
 from app.storage.exceptions import InvalidPageIdError
 from app.storage.page import Page
@@ -18,7 +21,7 @@ from app.storage.page import Page
 class BufferManager:
     """Manages an in-memory pool of database page frames.
 
-    Provides caching, pinning, dirty tracking, and deterministic LRU eviction
+    Provides caching, pinning, dirty tracking, DPT maintenance, and deterministic LRU eviction
     for database pages backed by physical DiskManager I/O.
     """
 
@@ -27,13 +30,15 @@ class BufferManager:
         disk_manager: DiskManager,
         pool_size: int = DEFAULT_BUFFER_POOL_SIZE,
         log_manager: Optional[Any] = None,
+        dirty_page_table: Optional[DirtyPageTable] = None,
     ) -> None:
-        """Initialize BufferManager with an underlying DiskManager, buffer pool size, and optional LogManager.
+        """Initialize BufferManager with an underlying DiskManager, buffer pool size, LogManager, and DPT.
 
         Args:
             disk_manager: DiskManager instance for physical page I/O.
             pool_size: Maximum number of pages held in memory simultaneously.
             log_manager: Optional LogManager instance for WAL-before-flush enforcement.
+            dirty_page_table: Optional DirtyPageTable instance (creates a new instance by default).
 
         Raises:
             ValueError: If pool_size is not a positive integer.
@@ -44,11 +49,24 @@ class BufferManager:
         self._disk_manager: DiskManager = disk_manager
         self._pool_size: int = pool_size
         self._log_manager: Optional[Any] = log_manager
+        self._dirty_page_table: DirtyPageTable = (
+            dirty_page_table if dirty_page_table is not None else DirtyPageTable()
+        )
         self._frames: List[Frame] = [Frame(frame_id=i) for i in range(pool_size)]
         self._page_table: Dict[int, int] = {}  # page_id -> frame_id
         self._free_frames: List[int] = list(range(pool_size))
         self._replacer: LRUReplacer = LRUReplacer()
         self._is_closed: bool = False
+
+    @property
+    def dirty_page_table(self) -> DirtyPageTable:
+        """Return the Dirty Page Table (DPT) associated with this BufferManager."""
+        return self._dirty_page_table
+
+    @property
+    def dpt(self) -> DirtyPageTable:
+        """Alias property for dirty_page_table."""
+        return self._dirty_page_table
 
     @property
     def disk_manager(self) -> DiskManager:
@@ -146,6 +164,8 @@ class BufferManager:
                 self._ensure_wal_flushed_for_frame(frame)
                 self._disk_manager.write_page(frame.page_id, frame.page)
                 self._disk_manager.flush()
+                self._dirty_page_table.clean_page(frame.page_id)
+                frame.is_dirty = False
 
             # Remove old page mapping
             if frame.page_id is not None and frame.page_id in self._page_table:
@@ -205,6 +225,8 @@ class BufferManager:
             )
 
         frame.unpin(is_dirty=is_dirty)
+        if is_dirty and frame.page_lsn > 0:
+            self._dirty_page_table.set_dirty(page_id, frame.page_lsn)
 
         if frame.pin_count == 0:
             self._replacer.unpin(frame_id)
@@ -214,7 +236,7 @@ class BufferManager:
     def flush_page(self, page_id: int) -> None:
         """Write a resident dirty page to disk and mark it clean.
 
-        Enforces WAL durability through page_lsn before writing to disk.
+        Enforces WAL durability through page_lsn before writing to disk and cleans DPT.
 
         Args:
             page_id: Page ID to flush.
@@ -245,9 +267,10 @@ class BufferManager:
                 self._disk_manager.write_page(frame.page_id, frame.page)
                 self._disk_manager.flush()
                 frame.is_dirty = False
+                self._dirty_page_table.clean_page(frame.page_id)
 
     def flush_all_pages(self) -> None:
-        """Flush all resident dirty pages to disk and mark them clean.
+        """Flush all resident dirty pages to disk, mark them clean, and clean DPT.
 
         Enforces WAL durability through each page's page_lsn before disk write.
         """
@@ -258,6 +281,7 @@ class BufferManager:
                 self._ensure_wal_flushed_for_frame(frame)
                 self._disk_manager.write_page(frame.page_id, frame.page)
                 frame.is_dirty = False
+                self._dirty_page_table.clean_page(frame.page_id)
 
         self._disk_manager.flush()
 
@@ -279,7 +303,7 @@ class BufferManager:
         return self._frames[self._page_table[page_id]].page_lsn
 
     def set_page_lsn(self, page_id: int, page_lsn: int) -> None:
-        """Associate an LSN with a resident page frame and mark it dirty.
+        """Associate an LSN with a resident page frame, mark it dirty, and update DPT.
 
         Args:
             page_id: Target page ID.
@@ -294,6 +318,9 @@ class BufferManager:
             raise PageNotResidentError(f"Page {page_id} is not resident in buffer pool.")
         frame = self._frames[self._page_table[page_id]]
         frame.page_lsn = page_lsn
+        frame.is_dirty = True
+        if page_lsn > 0:
+            self._dirty_page_table.set_dirty(page_id, page_lsn)
 
     def is_dirty(self, page_id: int) -> bool:
         """Check whether a resident page is dirty.
