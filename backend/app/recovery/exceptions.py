@@ -7,3 +7,7 @@ class RecoveryError(Exception):
 
 class AnalysisError(RecoveryError):
     """Raised when an error occurs during the ARIES Analysis phase."""
+
+
+class RedoError(RecoveryError):
+    """Raised when an error occurs during the ARIES Redo phase."""

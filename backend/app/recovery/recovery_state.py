@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional, Union
 from app.checkpoint.checkpoint import CheckpointInfo
-from app.recovery.exceptions import AnalysisError
+from app.recovery.exceptions import AnalysisError, RedoError
 from app.transaction.transaction import TransactionState
 
 
@@ -230,3 +230,127 @@ class AnalysisResult:
             f"AnalysisResult(winners={self._winners}, losers={self._losers}, "
             f"dpt_entries={len(self._dirty_page_table)}, redo_start_lsn={self._redo_start_lsn})"
         )
+
+
+class RedoResult:
+    """Encapsulates the complete result of the ARIES Redo recovery phase.
+
+    Attributes:
+        redo_start_lsn: LSN where Redo log scanning commenced (or None if DPT was empty).
+        last_scanned_lsn: Highest LSN observed and processed during Redo (or None).
+        records_scanned: Total number of log records scanned from redo_start_lsn.
+        records_redone: Number of UPDATE records successfully replayed to buffer pages.
+        records_skipped: Number of records skipped (non-UPDATE, DPT filter, recLSN filter, or page_lsn check).
+        pages_modified: Sorted list of unique page IDs modified during Redo.
+        pages_skipped: Sorted list of unique page IDs referenced in skipped UPDATE records.
+    """
+
+    __slots__ = (
+        "_redo_start_lsn",
+        "_last_scanned_lsn",
+        "_records_scanned",
+        "_records_redone",
+        "_records_skipped",
+        "_pages_modified",
+        "_pages_skipped",
+    )
+
+    def __init__(
+        self,
+        redo_start_lsn: Optional[int] = None,
+        last_scanned_lsn: Optional[int] = None,
+        records_scanned: int = 0,
+        records_redone: int = 0,
+        records_skipped: int = 0,
+        pages_modified: Optional[List[int]] = None,
+        pages_skipped: Optional[List[int]] = None,
+    ) -> None:
+        """Initialize immutable RedoResult."""
+        if redo_start_lsn is not None and (not isinstance(redo_start_lsn, int) or isinstance(redo_start_lsn, bool) or redo_start_lsn <= 0):
+            raise RedoError(f"redo_start_lsn must be a positive integer or None, got {redo_start_lsn!r}")
+        if last_scanned_lsn is not None and (not isinstance(last_scanned_lsn, int) or isinstance(last_scanned_lsn, bool) or last_scanned_lsn <= 0):
+            raise RedoError(f"last_scanned_lsn must be a positive integer or None, got {last_scanned_lsn!r}")
+        if not isinstance(records_scanned, int) or isinstance(records_scanned, bool) or records_scanned < 0:
+            raise RedoError(f"records_scanned must be a non-negative integer, got {records_scanned!r}")
+        if not isinstance(records_redone, int) or isinstance(records_redone, bool) or records_redone < 0:
+            raise RedoError(f"records_redone must be a non-negative integer, got {records_redone!r}")
+        if not isinstance(records_skipped, int) or isinstance(records_skipped, bool) or records_skipped < 0:
+            raise RedoError(f"records_skipped must be a non-negative integer, got {records_skipped!r}")
+
+        self._redo_start_lsn: Optional[int] = redo_start_lsn
+        self._last_scanned_lsn: Optional[int] = last_scanned_lsn
+        self._records_scanned: int = records_scanned
+        self._records_redone: int = records_redone
+        self._records_skipped: int = records_skipped
+        self._pages_modified: List[int] = sorted(list(set(pages_modified))) if pages_modified is not None else []
+        self._pages_skipped: List[int] = sorted(list(set(pages_skipped))) if pages_skipped is not None else []
+
+    @property
+    def redo_start_lsn(self) -> Optional[int]:
+        """Return the Redo starting LSN."""
+        return self._redo_start_lsn
+
+    @property
+    def last_scanned_lsn(self) -> Optional[int]:
+        """Return the highest LSN scanned during Redo."""
+        return self._last_scanned_lsn
+
+    @property
+    def records_scanned(self) -> int:
+        """Return the total number of log records scanned."""
+        return self._records_scanned
+
+    @property
+    def records_redone(self) -> int:
+        """Return the number of UPDATE records replayed."""
+        return self._records_redone
+
+    @property
+    def records_skipped(self) -> int:
+        """Return the number of records skipped."""
+        return self._records_skipped
+
+    @property
+    def pages_modified(self) -> List[int]:
+        """Return a copy of the sorted list of unique modified page IDs."""
+        return list(self._pages_modified)
+
+    @property
+    def pages_skipped(self) -> List[int]:
+        """Return a copy of the sorted list of unique skipped page IDs."""
+        return list(self._pages_skipped)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert redo result to dictionary format."""
+        return {
+            "redo_start_lsn": self._redo_start_lsn,
+            "last_scanned_lsn": self._last_scanned_lsn,
+            "records_scanned": self._records_scanned,
+            "records_redone": self._records_redone,
+            "records_skipped": self._records_skipped,
+            "pages_modified": list(self._pages_modified),
+            "pages_skipped": list(self._pages_skipped),
+        }
+
+    def __eq__(self, other: object) -> bool:
+        """Equality check."""
+        if not isinstance(other, RedoResult):
+            return False
+        return (
+            self._redo_start_lsn == other._redo_start_lsn
+            and self._last_scanned_lsn == other._last_scanned_lsn
+            and self._records_scanned == other._records_scanned
+            and self._records_redone == other._records_redone
+            and self._records_skipped == other._records_skipped
+            and self._pages_modified == other._pages_modified
+            and self._pages_skipped == other._pages_skipped
+        )
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return (
+            f"RedoResult(redo_start_lsn={self._redo_start_lsn}, "
+            f"scanned={self._records_scanned}, redone={self._records_redone}, "
+            f"skipped={self._records_skipped}, pages_modified={self._pages_modified})"
+        )
+
