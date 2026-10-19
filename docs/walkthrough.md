@@ -130,8 +130,99 @@ The test suite in [`backend/tests/test_undo.py`](file:///c:/Users/siddh/OneDrive
 ## 7. Known Limitations & Phase 10 Readiness
 
 1. **Automatic Restart Manager Orchestration**:
-   - The end-to-end restart recovery orchestrator (`RecoveryManager.recover()`), which automatically sequences Analysis -> Redo -> Undo and coordinates restarts, is deferred to Phase 10.
-2. **Dynamic Log Truncation / Checkpoint Reclamation**:
-   - WAL logs currently retain history from the beginning. Phase 10 restart manager will interface with the checkpointing subsystem to compute recovery checkpoints and safe log truncation horizons.
-3. **Phase 10 Readiness**:
-   - Analysis (Phase 7), Redo (Phase 8), and Undo (Phase 9) are fully implemented, independently tested, and ready to be integrated into the complete ARIES crash recovery orchestrator in Phase 10.
+   - Completed in Phase 10 via `RecoveryManager.recover()`.
+2. **Phase 10 Readiness**:
+   - Analysis (Phase 7), Redo (Phase 8), and Undo (Phase 9) are fully integrated into the complete ARIES crash recovery orchestrator in Phase 10.
+
+---
+
+# Phase 10: Complete ARIES Crash-Recovery Orchestration — Walkthrough
+
+## Overview
+
+Phase 10 completes the implementation and verification of the **RecoveryManager**, which coordinates the existing ARIES recovery components (Analysis, Redo, and Undo) into a unified, restart-safe, and crash-resilient recovery workflow.
+
+---
+
+## 1. Architecture of RecoveryManager
+
+The `RecoveryManager` resides in [`backend/app/recovery/recovery_manager.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/recovery/recovery_manager.py) and coordinates:
+```
+           +---------------------------------------------+
+           |               RecoveryManager               |
+           +---------------------------------------------+
+                                  |
+                                  v
+           +---------------------------------------------+
+           |                   STAGE 1                   |
+           |                  Analysis                   |
+           |  (Scans WAL forward, builds tx table & DPT) |
+           +---------------------------------------------+
+                                  |
+                   Fault: AFTER_ANALYSIS_BEFORE_REDO
+                                  v
+           +---------------------------------------------+
+           |                   STAGE 2                   |
+           |                    Redo                     |
+           |      (Repeats history from min recLSN)      |
+           +---------------------------------------------+
+                                  |
+                    Fault: AFTER_REDO_BEFORE_UNDO
+                                  v
+           +---------------------------------------------+
+           |                   STAGE 3                   |
+           |                    Undo                     |
+           | (Rolls back active losers in max-LSN order) |
+           +---------------------------------------------+
+                                  |
+                  Fault: AFTER_UNDO_BEFORE_COMPLETE
+                                  v
+           +---------------------------------------------+
+           |                   STAGE 4                   |
+           |          Verification & Persistence         |
+           |  (flush_all_pages, build RecoveryResult)    |
+           +---------------------------------------------+
+```
+
+---
+
+## 2. RecoveryResult Structure
+
+`RecoveryResult` (defined in [`backend/app/recovery/recovery_state.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/recovery/recovery_state.py)) encapsulates the entire recovery process:
+- **`is_success` / `success`**: Boolean indicating full recovery success.
+- **`stage`**: String indicating completion status (`COMPLETE`, `FAILED_AT_ANALYSIS`, `FAILED_AT_REDO`, `FAILED_AT_UNDO`).
+- **`error_message`**: Descriptive error message if failure occurred.
+- **`analysis_result`**: Subordinate `AnalysisResult`.
+- **`redo_result`**: Subordinate `RedoResult`.
+- **`undo_result`**: Subordinate `UndoResult`.
+- **`pages_modified`**: Sorted unique list of all pages modified during Redo and Undo.
+- **`winners` & `losers`**: Transaction IDs identified and resolved.
+- **`clrs_generated` & `updates_undone`**: Undo operations recorded.
+
+---
+
+## 3. Test Suite Verification (All 19 Scenarios)
+
+The test suite in [`backend/tests/test_recovery_manager.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_recovery_manager.py) validates all required scenarios:
+
+| # | Test Scenario | Verified Behavior | Status |
+|---|---------------|-------------------|--------|
+| 1 | `test_recovery_with_no_transactions_requiring_undo` | Winner-only or clean database; 0 undo operations, complete result | PASSED |
+| 2 | `test_recovery_of_committed_transaction` | Unflushed dirty page of committed transaction replayed by Redo | PASSED |
+| 3 | `test_recovery_of_single_loser_transaction` | Single loser rolled back with CLR and completion ABORT record | PASSED |
+| 4 | `test_recovery_of_multiple_interleaved_loser_transactions` | Interleaved losers across multiple pages rolled back via priority queue | PASSED |
+| 5 | `test_recovery_from_valid_checkpoint` | Checkpoint snapshot loaded, analysis scans from checkpoint begin | PASSED |
+| 6 | `test_recovery_with_incomplete_abort` | Incomplete aborted transaction recognized and fully rolled back | PASSED |
+| 7 | `test_recovery_after_durable_clr_before_page_flush` | Crash after CLR flush: Redo replays CLR, Undo skips duplicate | PASSED |
+| 8 | `test_recovery_after_crash_during_undo` | Crash midway through Undo resumes from CLR undo_next_lsn | PASSED |
+| 9 | `test_repeated_crash_and_recovery_cycles` | Subprocess crash at AFTER_REDO_BEFORE_UNDO followed by restart | PASSED |
+| 10 | `test_idempotent_recovery_after_completion` | Running recovery twice on completed state does 0 undo steps | PASSED |
+| 11 | `test_invalid_or_corrupted_wal_causes_clear_failure` | Corrupted magic/CRC raises LogCorruptionError; recovery fails | PASSED |
+| 12 | `test_stage_ordering_is_analysis_redo_undo` | Proves strictly sequential Analysis -> Redo -> Undo execution | PASSED |
+| 13 | `test_failed_stage_prevents_later_stages_from_reporting_success` | Failure at Redo prevents Undo and reports FAILED_AT_REDO | PASSED |
+| 14 | `test_recovery_result_structure_and_immutability` | Properties, immutability, to_dict, repr, and eq validation | PASSED |
+| 15 | `test_existing_phase_0_to_9_behavior_compatibility` | Standalone Analysis, Redo, Undo, and LogManager APIs work | PASSED |
+| 16 | `test_loser_transaction_with_no_update_records` | Loser with no updates completes with ABORT record cleanly | PASSED |
+| 17 | `test_recover_from_files_convenience_api` | RecoveryManager.recover_from_files opens, recovers, and closes | PASSED |
+| 18 | `test_constructor_validations_and_closed_managers` | Closed or None managers rejected with RecoveryManagerError | PASSED |
+| 19 | `test_crash_at_after_undo_before_complete_and_restart_recovery` | Subprocess crash at AFTER_UNDO_BEFORE_COMPLETE followed by restart | PASSED |

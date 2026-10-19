@@ -134,3 +134,62 @@ Subprocess tests execute real process terminations (`sys.exit(42)`) to verify th
 - `remaining_losers`: Sorted list of incomplete transactions (empty on completion)
 - `is_complete`: Boolean flag indicating full recovery completion
 - Immutable slots and defensively copied lists.
+
+---
+
+# Phase 10: Complete ARIES Crash-Recovery Orchestration — Implementation Plan
+
+## 1. Architectural Context & Objective
+
+The objective of Phase 10 is implementing a **RecoveryManager** that coordinates the existing ARIES recovery components (Analysis, Redo, and Undo) into a restart-safe, complete crash-recovery workflow.
+- **Analysis**: Scans WAL forward from the latest valid checkpoint (or beginning of log) to reconstruct the Transaction Table (identifying winners and losers) and Dirty Page Table (DPT) with initial recLSNs.
+- **Redo**: Repeats history by scanning forward from `redo_start_lsn` (minimum recLSN in DPT) and replaying all eligible `UPDATE` and `CLR` records.
+- **Undo**: Rolls back active uncommitted (loser) transactions backward in global descending-LSN order, applying before-images, generating CLRs, enforcing WAL-before-page durability, and appending completion `ABORT` records.
+- **Final Verification & Result Construction**: Persists all modified pages via `BufferManager.flush_all_pages()`, checks full completion, and produces an immutable `RecoveryResult`.
+
+## 2. RecoveryManager Architecture & Public API
+
+The `RecoveryManager` class is implemented in [`backend/app/recovery/recovery_manager.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/recovery/recovery_manager.py):
+
+### Public APIs:
+1. **Instance Method**:
+   ```python
+   manager = RecoveryManager(log_manager=lm, buffer_manager=bm, checkpoint_manager=cm)
+   result = manager.recover(raise_on_error=True)
+   ```
+2. **Dual Class/Instance Method**:
+   ```python
+   result = RecoveryManager.recover(log_manager=lm, buffer_manager=bm, checkpoint_manager=cm, raise_on_error=True)
+   ```
+3. **Convenience File-Based Recovery**:
+   ```python
+   result = RecoveryManager.recover_from_files(db_path=db_path, wal_path=wal_path, pool_size=10, raise_on_error=True)
+   ```
+
+### RecoveryResult Data Model:
+An immutable data class in [`backend/app/recovery/recovery_state.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/recovery/recovery_state.py) containing:
+- `is_success`: bool indicating overall recovery success
+- `stage`: Stage reached or completed (`COMPLETE`, `FAILED_AT_ANALYSIS`, `FAILED_AT_REDO`, `FAILED_AT_UNDO`)
+- `error_message`: Optional failure description if recovery failed
+- `analysis_result`: Reconstructed `AnalysisResult`
+- `redo_result`: Reconstructed `RedoResult`
+- `undo_result`: Reconstructed `UndoResult`
+- Aggregated properties: `winners`, `losers`, `pages_modified`, `records_redone`, `clrs_generated`, `updates_undone`, `completed_transactions`
+- Serialization via `to_dict()`, equality check `__eq__`, and human-readable `__repr__`.
+
+## 3. Strict Recovery Stage Ordering
+
+Recovery execution adheres strictly to canonical ARIES stage sequencing:
+1. **Stage 1 (Analysis)**: Reconstructs state without modifying pages or WAL.
+   - Fault Point: `AFTER_ANALYSIS_BEFORE_REDO`
+2. **Stage 2 (Redo)**: Replays updates and CLRs for winners and losers from `redo_start_lsn`.
+   - Fault Point: `AFTER_REDO_BEFORE_UNDO`
+3. **Stage 3 (Undo)**: Undoes uncommitted losers backward, logging CLRs and completion records.
+   - Fault Point: `AFTER_UNDO_BEFORE_COMPLETE`
+4. **Stage 4 (Verification & Flush)**: Persists all buffer pool pages to disk and validates `undo_result.is_complete`.
+
+## 4. Startup & Restart Safety
+
+- Uses existing persistent `.wal` and `.db` files without truncation or overwrite.
+- Re-running recovery on an already-recovered database is idempotent (0 losers, 0 CLRs, 0 page writes).
+- Crashes during Redo or Undo are safely resumable on restart using durable CLRs and `undo_next_lsn`.

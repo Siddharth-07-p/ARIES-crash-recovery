@@ -15,3 +15,7 @@ class RedoError(RecoveryError):
 
 class UndoError(RecoveryError):
     """Raised when an error occurs during the ARIES Undo phase."""
+
+
+class RecoveryManagerError(RecoveryError):
+    """Raised when an error occurs during crash recovery orchestration."""

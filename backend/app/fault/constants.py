@@ -35,3 +35,12 @@ class FaultPoint(str, Enum):
 
     # Triggered during recovery Undo after the modified page is flushed to disk
     DURING_UNDO_AFTER_PAGE_FLUSH = "DURING_UNDO_AFTER_PAGE_FLUSH"
+
+    # Triggered during recovery orchestration after Analysis completes, before Redo begins
+    AFTER_ANALYSIS_BEFORE_REDO = "AFTER_ANALYSIS_BEFORE_REDO"
+
+    # Triggered during recovery orchestration after Redo completes, before Undo begins
+    AFTER_REDO_BEFORE_UNDO = "AFTER_REDO_BEFORE_UNDO"
+
+    # Triggered during recovery orchestration after Undo completes, before final completion verification
+    AFTER_UNDO_BEFORE_COMPLETE = "AFTER_UNDO_BEFORE_COMPLETE"

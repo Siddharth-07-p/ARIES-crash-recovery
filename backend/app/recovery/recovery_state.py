@@ -512,3 +512,190 @@ class UndoResult:
             f"clrs={self._clrs_generated}, updates_undone={self._updates_undone}, "
             f"pages_modified={self._pages_modified}, complete={self._is_complete})"
         )
+
+
+class RecoveryResult:
+    """Encapsulates the complete result of the ARIES crash recovery workflow.
+
+    Coordinates and aggregates outcomes across all recovery stages:
+        1. Analysis (winner/loser identification, DPT reconstruction)
+        2. Redo (repeating history, replaying updates and CLRs)
+        3. Undo (rolling back active loser transactions with CLRs)
+        4. Final verification and persistence
+
+    Attributes:
+        is_success: True if all recovery stages completed successfully without error.
+        analysis_result: Outcome of the Analysis phase (or None if failed before Analysis).
+        redo_result: Outcome of the Redo phase (or None if failed before Redo).
+        undo_result: Outcome of the Undo phase (or None if failed before Undo).
+        error_message: Description of the failure if recovery did not succeed.
+        stage: Name of the final completed stage or stage where failure occurred.
+    """
+
+    __slots__ = (
+        "_is_success",
+        "_analysis_result",
+        "_redo_result",
+        "_undo_result",
+        "_error_message",
+        "_stage",
+    )
+
+    def __init__(
+        self,
+        is_success: bool = True,
+        analysis_result: Optional[AnalysisResult] = None,
+        redo_result: Optional[RedoResult] = None,
+        undo_result: Optional[UndoResult] = None,
+        error_message: Optional[str] = None,
+        stage: str = "COMPLETE",
+    ) -> None:
+        """Initialize immutable RecoveryResult."""
+        if not isinstance(is_success, bool):
+            raise RecoveryError(f"is_success must be a boolean, got {is_success!r}")
+        if analysis_result is not None and not isinstance(analysis_result, AnalysisResult):
+            raise RecoveryError(f"analysis_result must be AnalysisResult or None, got {type(analysis_result).__name__}")
+        if redo_result is not None and not isinstance(redo_result, RedoResult):
+            raise RecoveryError(f"redo_result must be RedoResult or None, got {type(redo_result).__name__}")
+        if undo_result is not None and not isinstance(undo_result, UndoResult):
+            raise RecoveryError(f"undo_result must be UndoResult or None, got {type(undo_result).__name__}")
+        if error_message is not None and not isinstance(error_message, str):
+            raise RecoveryError(f"error_message must be a string or None, got {error_message!r}")
+        if not isinstance(stage, str):
+            raise RecoveryError(f"stage must be a string, got {stage!r}")
+
+        self._is_success: bool = is_success
+        self._analysis_result: Optional[AnalysisResult] = analysis_result
+        self._redo_result: Optional[RedoResult] = redo_result
+        self._undo_result: Optional[UndoResult] = undo_result
+        self._error_message: Optional[str] = error_message
+        self._stage: str = stage
+
+    @property
+    def is_success(self) -> bool:
+        """Return True if recovery completed successfully."""
+        return self._is_success
+
+    @property
+    def success(self) -> bool:
+        """Alias for is_success."""
+        return self._is_success
+
+    @property
+    def stage(self) -> str:
+        """Return the final stage reached or completed."""
+        return self._stage
+
+    @property
+    def error_message(self) -> Optional[str]:
+        """Return failure description or None if successful."""
+        return self._error_message
+
+    @property
+    def analysis_result(self) -> Optional[AnalysisResult]:
+        """Return the AnalysisResult (or None if Analysis was not executed)."""
+        return self._analysis_result
+
+    @property
+    def redo_result(self) -> Optional[RedoResult]:
+        """Return the RedoResult (or None if Redo was not executed)."""
+        return self._redo_result
+
+    @property
+    def undo_result(self) -> Optional[UndoResult]:
+        """Return the UndoResult (or None if Undo was not executed)."""
+        return self._undo_result
+
+    @property
+    def winners(self) -> List[int]:
+        """Return list of winner transaction IDs identified during recovery."""
+        if self._analysis_result is not None:
+            return list(self._analysis_result.winners)
+        return []
+
+    @property
+    def losers(self) -> List[int]:
+        """Return list of loser transaction IDs identified during recovery."""
+        if self._analysis_result is not None:
+            return list(self._analysis_result.losers)
+        return []
+
+    @property
+    def pages_modified(self) -> List[int]:
+        """Return sorted unique list of all page IDs modified during Redo and Undo."""
+        modified = set()
+        if self._redo_result is not None:
+            modified.update(self._redo_result.pages_modified)
+        if self._undo_result is not None:
+            modified.update(self._undo_result.pages_modified)
+        return sorted(list(modified))
+
+    @property
+    def records_redone(self) -> int:
+        """Return the number of log records redone during Redo."""
+        if self._redo_result is not None:
+            return self._redo_result.records_redone
+        return 0
+
+    @property
+    def clrs_generated(self) -> int:
+        """Return the number of CLR records generated during Undo."""
+        if self._undo_result is not None:
+            return self._undo_result.clrs_generated
+        return 0
+
+    @property
+    def updates_undone(self) -> int:
+        """Return the number of UPDATE records undone during Undo."""
+        if self._undo_result is not None:
+            return self._undo_result.updates_undone
+        return 0
+
+    @property
+    def completed_transactions(self) -> List[int]:
+        """Return sorted unique list of all transactions that committed or completed undo."""
+        txs = set()
+        if self._analysis_result is not None:
+            txs.update(self._analysis_result.winners)
+        if self._undo_result is not None:
+            txs.update(self._undo_result.completed_transactions)
+        return sorted(list(txs))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert recovery result to dictionary representation."""
+        return {
+            "is_success": self._is_success,
+            "success": self._is_success,
+            "stage": self._stage,
+            "error_message": self._error_message,
+            "analysis": self._analysis_result.to_dict() if self._analysis_result is not None else None,
+            "redo": self._redo_result.to_dict() if self._redo_result is not None else None,
+            "undo": self._undo_result.to_dict() if self._undo_result is not None else None,
+            "pages_modified": self.pages_modified,
+            "winners": self.winners,
+            "losers": self.losers,
+            "records_redone": self.records_redone,
+            "clrs_generated": self.clrs_generated,
+            "updates_undone": self.updates_undone,
+            "completed_transactions": self.completed_transactions,
+        }
+
+    def __eq__(self, other: object) -> bool:
+        """Equality check."""
+        if not isinstance(other, RecoveryResult):
+            return False
+        return (
+            self._is_success == other._is_success
+            and self._stage == other._stage
+            and self._error_message == other._error_message
+            and self._analysis_result == other._analysis_result
+            and self._redo_result == other._redo_result
+            and self._undo_result == other._undo_result
+        )
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return (
+            f"RecoveryResult(success={self._is_success}, stage='{self._stage}', "
+            f"winners={self.winners}, losers={self.losers}, pages_modified={self.pages_modified})"
+        )
