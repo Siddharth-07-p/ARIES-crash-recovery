@@ -322,3 +322,50 @@ All 17 verification scenarios in [`backend/tests/test_workload_generator.py`](fi
 2. **Durability & Atomicity**: Committed transactions permanently persist; aborted transactions roll back cleanly via CLRs at runtime; incomplete transactions roll back upon crash restart recovery.
 3. **No Uncommitted Overwrite Contention**: Slot-based page offset partitioning guarantees that concurrent uncommitted transactions do not create uncommitted dirty-write dependencies.
 4. **Buffer Pool Pin Safety**: Pin counts are strictly 0 and frames clean after execution across both normal and recovery paths.
+
+---
+
+# Phase 13: ARIES Performance Benchmarking Framework Walkthrough
+
+## 1. Overview & Architecture
+
+Phase 13 establishes a reproducible, modular performance benchmarking framework under `backend/app/benchmark/`:
+- [`backend/app/benchmark/config.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/config.py): `BenchmarkConfig` validation, repetitions, warmup, seeds, and scenario parameters.
+- [`backend/app/benchmark/models.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/models.py): Structured models for `EnvironmentMetadata`, `WorkloadRunMetrics`, `RecoveryRunMetrics`, `BenchmarkRunResult`, `MetricDistribution`, and `BenchmarkScenarioResult`.
+- [`backend/app/benchmark/scenarios.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/scenarios.py): Built-in preset scenario catalogue covering varying sizes, read/write ratios, contention hotspots, abort rates, recovery-only tests, and crash experiments.
+- [`backend/app/benchmark/runner.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/runner.py): Execution engine managing isolated temporary directories, separate setup vs. execution timing intervals, and post-run database correctness validation.
+- [`backend/app/benchmark/exporter.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/exporter.py): Exporter generating structured JSON files and CSV files with explicit units.
+- [`backend/app/benchmark/cli.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/cli.py): CLI interface (`python -m app.benchmark`) with summary console tables.
+- [`backend/app/benchmark/exceptions.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/exceptions.py): Domain-specific benchmarking exception hierarchy.
+
+## 2. Benchmark Test Suite (17 Scenarios)
+
+All 17 verification scenarios in [`backend/tests/test_benchmark.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_benchmark.py) passed:
+
+| # | Scenario | Test Name | Key Invariants Verified | Status |
+|---|----------|-----------|--------------------------|--------|
+| 1 | Config validation | `test_01_benchmark_config_validation` | Rejection of empty names, non-positive repetitions, negative warmup, bad types | PASSED |
+| 2 | Small benchmark execution | `test_02_small_benchmark_scenario_execution` | Full execution of small_workload producing valid measured & warmup runs | PASSED |
+| 3 | Metric calculation & units | `test_03_correct_metric_calculations_and_units` | TPS, ops/sec, completed txs, and recovery metrics calculated with exact arithmetic | PASSED |
+| 4 | Zero-duration division safeguards | `test_04_zero_operation_and_zero_duration_safeguards` | Zero duration, negative durations, and empty lists handled without ZeroDivisionError | PASSED |
+| 5 | Repetitions & aggregate statistics | `test_05_multiple_repetitions_and_aggregate_statistics` | Mean, median, min, max, std_dev, and p95 distributions calculated correctly | PASSED |
+| 6 | Fixed-seed reproducibility | `test_06_fixed_seed_reproducibility` | Identical seeds generate identical operation counts and outcomes across runs | PASSED |
+| 7 | File isolation across runs | `test_07_isolation_of_database_and_wal_files_across_runs` | Per-run temp directories cleaned up safely without leaking files | PASSED |
+| 8 | Recovery-only timing | `test_08_recovery_only_timing_and_result_collection` | Crash state prepared outside timing; Analysis, Redo, Undo timed separately | PASSED |
+| 9 | Crash-recovery scenario | `test_09_optional_crash_recovery_scenario_correctness` | Subprocess fault injection terminates cleanly and parent recovers with metrics | PASSED |
+| 10 | Failed validation handling | `test_10_failed_workload_validation_marked_as_failed` | State mismatch correctly marks run and scenario as failed, not successful | PASSED |
+| 11 | CSV export schema | `test_11_csv_export_schema_and_contents` | CSV file exported with standard headers, units, and matching row counts | PASSED |
+| 12 | JSON export schema | `test_12_json_export_schema_and_contents` | JSON file exported with config, environment, aggregates, and run details | PASSED |
+| 13 | Metadata serialization | `test_13_metadata_serialization` | Hardware/platform metadata captured and serialized into JSON-safe dict | PASSED |
+| 14 | API & scenario compatibility | `test_14_compatibility_with_workload_and_recovery_manager` | Preset scenarios (read_heavy, update_heavy, etc.) execute seamlessly | PASSED |
+| 15 | Error handling & cleanup | `test_15_error_handling_and_cleanup_of_temporary_files` | Invalid paths raise BenchmarkExportError; unknown scenarios raise ConfigError | PASSED |
+| 16 | p95 interpolation & monotonicity | `test_16_p95_linear_interpolation_monotonicity` | Linear interpolation preserves monotonic percentile ordering min <= median <= p95 <= max | PASSED |
+| 17 | Crash timing separation | `test_17_crash_benchmark_separates_workload_and_recovery_timing` | Subprocess crash execution and parent restart recovery timed as distinct intervals | PASSED |
+
+## 3. Verified Correctness & Measurement Invariants
+
+1. **Separation of Setup and Timing**: Database page initialization and crash-state preparation are executed outside the measured intervals; timing is captured strictly around the workload execution loop or recovery operations.
+2. **Correctness Before Timing**: Every run is validated via `WorkloadExecutor.validate_database_state()`. Runs with state discrepancies are flagged as failed and excluded from valid statistical distributions.
+3. **Stage-Level Recovery Timing**: When enabled, Analysis, Redo, and Undo durations are measured using high-resolution monotonic timers (`time.perf_counter()`), without altering core recovery abstractions.
+4. **Environment Transparency**: Machine platform, CPU count, Python version, and execution timestamps are recorded with every benchmark result for reproducibility.
+5. **Division-Safe Metrics**: Zero elapsed time and zero operation edge cases safely produce `0.0` throughput instead of throwing exceptions.

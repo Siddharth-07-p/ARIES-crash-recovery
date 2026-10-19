@@ -280,3 +280,49 @@ Implemented in [`backend/tests/test_workload_generator.py`](file:///c:/Users/sid
 15. Compatibility with existing tests and public APIs.
 16. Expected-state validator detects disk mismatches, unallocated pages, and recovery discrepancies.
 17. Repeated updates by the same transaction to the same page and slot with full rollback.
+
+---
+
+# Phase 13: ARIES Performance Benchmarking Framework — Implementation Plan
+
+## 1. Objective & Scope
+
+Implement a modular, reproducible performance benchmarking framework for the ARIES database engine and synthetic workload generator.
+- Measure workload execution duration, transaction throughput (TPS), and operation throughput (ops/sec).
+- Measure recovery duration and stage-level breakdown (Analysis, Redo, Undo) without invasive changes to core recovery logic.
+- Distinguish setup and preparation from timed workload/recovery intervals.
+- Ensure strict correctness validation prior to recording benchmark results (failed validation = failed run).
+- Provide multi-run repetitions, warmup runs, and statistical distributions (mean, median, min, max, std_dev, p95).
+- Provide export facilities to JSON and CSV, and a CLI entry point.
+- Maintain full compatibility with all existing Phase 0–12 implementations without introducing monitoring APIs or frontend dashboard features.
+
+## 2. Benchmark Architecture
+
+- [`backend/app/benchmark/config.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/config.py): `BenchmarkConfig` validation, repetitions, warmup, seeds, and scenario parameters.
+- [`backend/app/benchmark/models.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/models.py): `EnvironmentMetadata`, `WorkloadRunMetrics`, `RecoveryRunMetrics`, `BenchmarkRunResult`, `MetricDistribution`, `BenchmarkScenarioResult`.
+- [`backend/app/benchmark/scenarios.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/scenarios.py): Standard preset scenarios (`small_workload`, `medium_workload`, `large_workload`, `read_heavy`, `update_heavy`, `hotspot_contention`, `interleaved_concurrent`, `high_abort`, `recovery_only`, `crash_recovery_commit_fault`).
+- [`backend/app/benchmark/runner.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/runner.py): `BenchmarkRunner` isolated execution engine, timing intervals, and post-run validation.
+- [`backend/app/benchmark/exporter.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/exporter.py): `BenchmarkExporter` for structured JSON and CSV formats.
+- [`backend/app/benchmark/cli.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/cli.py): CLI interface and console summary reporting (`python -m app.benchmark`).
+- [`backend/app/benchmark/exceptions.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/benchmark/exceptions.py): Domain-specific exception hierarchy (`BenchmarkError`, `BenchmarkConfigError`, etc.).
+
+## 3. Benchmark Test Suite (17 Scenarios)
+
+Implemented in [`backend/tests/test_benchmark.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_benchmark.py):
+1. Benchmark configuration validation and invalid input rejection.
+2. Small benchmark scenario execution and status reporting.
+3. Correct metric calculations, throughput formulas, and units.
+4. Zero-operation and zero-duration division safeguards.
+5. Multiple repetitions and aggregate statistics (mean, median, std_dev, p95).
+6. Fixed-seed reproducibility across independent executions.
+7. Isolation of database and WAL files across runs (no file leaks).
+8. Recovery-only timing and stage-level result collection.
+9. Optional crash-recovery scenario correctness with fault injection.
+10. Failed workload validation correctly marked as failed run.
+11. CSV export schema, units, and contents verification.
+12. JSON export schema, metadata, and contents verification.
+13. Hardware/platform environment metadata serialization.
+14. Compatibility with existing workload generator and recovery manager.
+15. Error handling and cleanup of temporary directories and export targets.
+16. p95 linear interpolation and monotonic percentile ordering (min <= median <= p95 <= max).
+17. Crash benchmark separation of child crash duration from parent recovery duration.
