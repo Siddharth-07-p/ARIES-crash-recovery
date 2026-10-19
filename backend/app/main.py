@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.monitoring import monitoring_router
 
 app = FastAPI(
     title="ARIES Crash Recovery System API",
@@ -25,6 +26,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(monitoring_router)
+
 
 @app.get("/")
 def root():
@@ -34,6 +37,7 @@ def root():
         "status": "online",
         "docs_url": "/docs",
         "health_url": "/api/health",
+        "monitoring_url": "/api/monitoring/status",
     }
 
 

@@ -326,3 +326,51 @@ Implemented in [`backend/tests/test_benchmark.py`](file:///c:/Users/siddh/OneDri
 15. Error handling and cleanup of temporary directories and export targets.
 16. p95 linear interpolation and monotonic percentile ordering (min <= median <= p95 <= max).
 17. Crash benchmark separation of child crash duration from parent recovery duration.
+
+---
+
+# Phase 14: Database Monitoring and Statistics APIs — Implementation Plan
+
+## 1. Objective & Scope
+
+Implement read-only monitoring and statistics APIs for the existing ARIES-inspired database recovery project under a dedicated FastAPI router (`/api/monitoring/*`).
+- Expose system status, transaction metrics, WAL statistics, buffer pool state, latest recovery outcome, synthetic workload summary, and benchmark results.
+- Keep monitoring completely decoupled from transaction execution and recovery logic.
+- Strictly read-only: monitoring queries must never mutate database or WAL state, allocate frames, or trigger recovery/transactions merely to answer a request.
+- Clear handling of uninitialized subsystems, closed managers, and absent results using documented states (`"uninitialized"`, `"not_run"`, `"not_available"`).
+- Preserve existing `/` and `/api/health` endpoints without regressions.
+
+## 2. Architecture & Subsystem Inspection
+
+- [`backend/app/monitoring/models.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/monitoring/models.py): Pydantic response models:
+  - `MonitoringStatusResponse`: service name, status (`operational`, `degraded`, `uninitialized`), database initialization flag, recovery status (`not_run`, `recovered`, `unrecovered`, `failed`), and ISO-8601 timestamp.
+  - `TransactionStatisticsResponse`: status (`available`, `uninitialized`), total started, committed, aborted, active count, and sorted list of active transaction IDs.
+  - `WALStatisticsResponse`: status, current LSN, flushed LSN, total log records count, WAL file size in bytes, and closed status.
+  - `BufferPoolStatisticsResponse`: status, frame capacity, resident pages count, pinned frames count, dirty pages count, available frame count, and closed status.
+  - `RecoveryStatisticsResponse`: status (`not_run`, `available`, `failed`), stage, success flag, winner/loser counts, records redone, CLRs generated, updates undone, pages modified count, and stage durations (seconds).
+  - `WorkloadSummaryResponse`: status (`available`, `not_available`), operation counts (planned, executed, reads, updates), transaction outcomes (started, committed, aborted, incomplete), validation flag, crash configuration, and fault point.
+  - `BenchmarkSummaryResponse`: status (`available`, `not_available`), scenario name, success flag, run counts (total, measured, warmup, valid, failed), and mean duration and throughput metrics.
+- [`backend/app/monitoring/state.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/monitoring/state.py): `MonitoringState` thread-safe registry with non-mutating metric extraction and safe handling of closed or missing components.
+- [`backend/app/monitoring/router.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/monitoring/router.py): FastAPI APIRouter mounted at `/api/monitoring` with standard HTTP GET endpoints.
+- [`backend/app/main.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/main.py): Integration of `monitoring_router` into the primary FastAPI app.
+
+## 3. Monitoring Test Suite (17 Scenarios)
+
+Implemented in [`backend/tests/test_monitoring_api.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_monitoring_api.py):
+1. `test_01_monitoring_status_response`: Uninitialized, operational, and degraded service status transitions.
+2. `test_02_transaction_statistics_when_transactions_exist`: Started, committed, aborted, and active counts and IDs.
+3. `test_03_wal_statistics_and_unavailable_states`: Current LSN, flushed LSN, total records, and file size tracking.
+4. `test_04_buffer_pool_statistics_and_unavailable_states`: Pool size, resident, pinned, dirty, and available frames calculation.
+5. `test_05_recovery_statistics_before_and_after_recovery`: `not_run` state transitions to `available` with redo/undo metrics.
+6. `test_06_recovery_failure_reporting`: Recovery failure reporting with error message and stage indicator.
+7. `test_07_workload_summary_when_no_workload_has_run`: Safe `not_available` response prior to workload run.
+8. `test_08_workload_summary_when_results_are_available`: Operation counts, transaction outcomes, and validity status.
+9. `test_09_benchmark_summary_when_no_benchmark_has_run`: Safe `not_available` response prior to benchmark run.
+10. `test_10_benchmark_summary_when_results_are_available`: Scenario metadata, run breakdowns, and mean throughputs.
+11. `test_11_response_schemas_and_data_types`: Strict Pydantic response model validation for all 7 endpoints.
+12. `test_12_requests_not_mutating_database_or_wal_state`: Repeated monitoring requests verify zero side-effects on LSN, WAL records, buffer state, or disk.
+13. `test_13_existing_api_health_compatibility`: Unaltered behavior and response schema for `/api/health`.
+14. `test_14_missing_or_uninitialized_components`: Graceful degradation when individual subsystems are unregistered.
+15. `test_15_error_handling_for_closed_components`: Safe metric extraction without raising `ClosedError` exceptions.
+16. `test_16_regression_coverage_for_existing_api_routes`: Root endpoint `/` and `/api/health` backward compatibility.
+17. `test_17_concurrency_and_closed_race_safety`: Thread-safe concurrent queries, exact eviction/free frame availability matching, and degraded status reporting upon recovery failure.

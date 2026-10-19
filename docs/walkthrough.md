@@ -369,3 +369,179 @@ All 17 verification scenarios in [`backend/tests/test_benchmark.py`](file:///c:/
 3. **Stage-Level Recovery Timing**: When enabled, Analysis, Redo, and Undo durations are measured using high-resolution monotonic timers (`time.perf_counter()`), without altering core recovery abstractions.
 4. **Environment Transparency**: Machine platform, CPU count, Python version, and execution timestamps are recorded with every benchmark result for reproducibility.
 5. **Division-Safe Metrics**: Zero elapsed time and zero operation edge cases safely produce `0.0` throughput instead of throwing exceptions.
+
+---
+
+# Phase 14: Database Monitoring and Statistics APIs Walkthrough
+
+## 1. Overview & Architecture
+
+Phase 14 delivers read-only monitoring and statistics REST APIs under the `/api/monitoring/*` namespace:
+- [`backend/app/monitoring/models.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/monitoring/models.py): Pydantic response models providing strongly-typed JSON serialization with explicit units.
+- [`backend/app/monitoring/state.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/monitoring/state.py): `MonitoringState` thread-safe registry that extracts read-only metrics directly from active subsystem managers without mutating buffer frames, transaction state, or WAL logs.
+- [`backend/app/monitoring/router.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/monitoring/router.py): Dedicated FastAPI APIRouter hosting all 7 monitoring endpoints.
+- [`backend/app/main.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/main.py): Registers the monitoring router alongside existing `/` and `/api/health` routes.
+
+## 2. Implemented Endpoints & Sample JSON Responses
+
+### 1. `GET /api/monitoring/status`
+Returns general service status, database subsystem readiness, and crash recovery status.
+```json
+{
+  "service": "ARIES Crash Recovery System",
+  "status": "operational",
+  "database_initialized": true,
+  "recovery_status": "recovered",
+  "latest_recovery_success": true,
+  "timestamp": "2026-10-19T18:08:42Z"
+}
+```
+
+### 2. `GET /api/monitoring/transactions`
+Returns transaction manager metrics including started, committed, aborted, and active counts and active IDs.
+```json
+{
+  "status": "available",
+  "total_started": 3,
+  "total_committed": 1,
+  "total_aborted": 1,
+  "active_count": 1,
+  "active_transaction_ids": [3]
+}
+```
+
+### 3. `GET /api/monitoring/wal`
+Returns Write-Ahead Logging statistics without rescanning log records or mutating disk state.
+```json
+{
+  "status": "available",
+  "current_lsn": 14,
+  "flushed_lsn": 14,
+  "total_records": 14,
+  "wal_file_size_bytes": 1024,
+  "is_closed": false
+}
+```
+
+### 4. `GET /api/monitoring/buffer-pool`
+Returns buffer frame allocation, resident pages, pinned pages, and dirty frame counts.
+```json
+{
+  "status": "available",
+  "pool_size_frames": 5,
+  "resident_pages_count": 2,
+  "pinned_frames_count": 1,
+  "dirty_pages_count": 1,
+  "available_frames_count": 4,
+  "is_closed": false
+}
+```
+
+### 5. `GET /api/monitoring/recovery`
+Returns the outcome and stage breakdown of the latest recovery operation (`not_run` if recovery has not run in the current application lifecycle).
+```json
+{
+  "status": "available",
+  "is_success": true,
+  "stage": "complete",
+  "error_message": null,
+  "winners_count": 1,
+  "losers_count": 1,
+  "records_redone": 3,
+  "clrs_generated": 1,
+  "updates_undone": 1,
+  "pages_modified_count": 1,
+  "analysis_duration_s": 0.0012,
+  "redo_duration_s": 0.0021,
+  "undo_duration_s": 0.0018,
+  "total_duration_s": 0.0051
+}
+```
+
+### 6. `GET /api/monitoring/workload`
+Returns summary statistics of the latest executed synthetic transaction workload (`not_available` if none has run).
+```json
+{
+  "status": "available",
+  "planned_operations": 20,
+  "executed_operations": 20,
+  "transactions_started": 5,
+  "transactions_committed": 4,
+  "transactions_aborted": 1,
+  "transactions_incomplete": 0,
+  "reads_executed": 10,
+  "updates_executed": 10,
+  "is_valid": true,
+  "crash_configured": false,
+  "crash_observed": false,
+  "fault_point": null
+}
+```
+
+### 7. `GET /api/monitoring/benchmark`
+Returns aggregate statistics of the latest executed benchmark scenario (`not_available` if none has run).
+```json
+{
+  "status": "available",
+  "scenario_name": "small_workload",
+  "is_success": true,
+  "total_runs": 4,
+  "measured_runs_count": 3,
+  "warmup_runs_count": 1,
+  "valid_runs_count": 3,
+  "failed_runs_count": 0,
+  "mean_workload_duration_s": 0.0452,
+  "mean_tx_throughput_tps": 221.24,
+  "mean_op_throughput_ops": 884.96,
+  "mean_recovery_duration_s": null
+}
+```
+
+## 3. Metric Mapping, Units, and Data Sources
+
+| Endpoint | Field | Type / Unit | Underlying Source |
+|---|---|---|---|
+| `/status` | `status` | string (`operational`/`degraded`/`uninitialized`) | Evaluated from registered managers, closed flags, and recovery success |
+| `/status` | `recovery_status` | string (`not_run`/`recovered`/`failed`) | `RecoveryManager.last_result` or recorded result |
+| `/transactions` | `total_started`, `total_committed`, `total_aborted` | integer (count) | `TransactionManager` lifecycle totals (`get_transaction_table()`) |
+| `/transactions` | `active_count`, `active_transaction_ids` | integer, list[int] | `TransactionManager.get_active_transactions()` |
+| `/wal` | `current_lsn`, `flushed_lsn` | uint64 | `LogManager.next_lsn - 1`, `LogManager.flushed_lsn` |
+| `/wal` | `total_records`, `wal_file_size_bytes` | int, bytes | `len(LogManager._records)`, `os.path.getsize(wal_path)` |
+| `/buffer-pool` | `pool_size_frames`, `resident_pages_count` | count | `BufferManager.pool_size`, `len(bm.get_resident_pages())` |
+| `/buffer-pool` | `pinned_frames_count`, `dirty_pages_count` | count | `bm.get_pin_count(pid) > 0`, `bm.is_dirty(pid)` |
+| `/buffer-pool` | `available_frames_count` | count | `len(bm._free_frames) + bm._replacer.size()` (0 when closed) |
+| `/recovery` | `records_redone`, `clrs_generated`, `updates_undone` | count | `RecoveryResult` fields |
+| `/recovery` | `analysis_duration_s`, `redo_duration_s`, `undo_duration_s` | float (seconds) | Monotonic timer measurements recorded during recovery |
+| `/workload` | `planned_operations`, `executed_operations` | count | `WorkloadResult` fields |
+| `/benchmark` | `mean_tx_throughput_tps`, `mean_op_throughput_ops` | tx/sec, ops/sec | `BenchmarkScenarioResult.aggregates` |
+
+## 4. Test Suite Verification (All 17 Scenarios)
+
+All 17 verification scenarios in [`backend/tests/test_monitoring_api.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_monitoring_api.py) passed:
+
+| # | Scenario | Test Name | Key Invariants Verified | Status |
+|---|----------|-----------|--------------------------|--------|
+| 1 | Status transitions | `test_01_monitoring_status_response` | Uninitialized, operational, and degraded statuses correctly reflected | PASSED |
+| 2 | Transaction stats | `test_02_transaction_statistics_when_transactions_exist` | Accurately aggregates committed, aborted, active counts and IDs | PASSED |
+| 3 | WAL stats | `test_03_wal_statistics_and_unavailable_states` | LSNs, record count, and WAL file size reported cleanly | PASSED |
+| 4 | Buffer pool stats | `test_04_buffer_pool_statistics_and_unavailable_states` | Frame capacity, resident, pinned, dirty, and available counts | PASSED |
+| 5 | Recovery stats | `test_05_recovery_statistics_before_and_after_recovery` | `not_run` prior to recovery; winners, losers, redos, undos after | PASSED |
+| 6 | Recovery failure | `test_06_recovery_failure_reporting` | Failed recovery status, stage, and error message serialized | PASSED |
+| 7 | Workload unrun | `test_07_workload_summary_when_no_workload_has_run` | Clean `not_available` response prior to workload run | PASSED |
+| 8 | Workload available | `test_08_workload_summary_when_results_are_available` | Operation breakdown and validation flags accurately exposed | PASSED |
+| 9 | Benchmark unrun | `test_09_benchmark_summary_when_no_benchmark_has_run` | Clean `not_available` response prior to benchmark run | PASSED |
+| 10 | Benchmark available | `test_10_benchmark_summary_when_results_are_available` | Aggregates, throughputs (TPS, ops/s), and run counts exposed | PASSED |
+| 11 | Response schemas | `test_11_response_schemas_and_data_types` | Validates Pydantic types across all 7 monitoring endpoints | PASSED |
+| 12 | Non-mutation invariant | `test_12_requests_not_mutating_database_or_wal_state` | Repeated GETs cause 0 change to LSNs, log records, buffer, DPT, or disk | PASSED |
+| 13 | Health compatibility | `test_13_existing_api_health_compatibility` | `/api/health` returns status: healthy and matching format | PASSED |
+| 14 | Missing components | `test_14_missing_or_uninitialized_components` | Unregistered components report safe uninitialized states | PASSED |
+| 15 | Closed managers | `test_15_error_handling_for_closed_components` | Closed BufferManager/TransactionManager handled without exceptions | PASSED |
+| 16 | API route regression | `test_16_regression_coverage_for_existing_api_routes` | Root `/` and `/api/health` backward compatibility verified | PASSED |
+| 17 | Concurrency & Availability | `test_17_concurrency_and_closed_race_safety` | Multi-threaded concurrency safety, exact allocation availability, degraded status on recovery failure | PASSED |
+
+## 5. Security and Non-Mutation Invariants
+
+1. **Strictly Read-Only**: Endpoints only inspect in-memory properties and filesystem file sizes. No database transactions, WAL records, or buffer allocations are performed.
+2. **Path Sanitization**: Monitoring endpoints accept no client-supplied file paths or filesystem scan requests, preventing path traversal vulnerabilities.
+3. **No Unauthenticated Secret Leakage**: No server host paths, credentials, or internal memory addresses are serialized.
+4. **Resilience to Closed Subsystems**: If a subsystem manager is closed or uninitialized, endpoints return documented degraded/uninitialized states rather than throwing unhandled `500 Internal Server Error` exceptions.
