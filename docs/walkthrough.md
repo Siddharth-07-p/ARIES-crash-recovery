@@ -278,3 +278,47 @@ All 20 required integration scenarios were executed and validated:
 4. **Compensation Log Records (CLRs)**: CLRs are written and flushed before compensating page writes; subsequent recovery runs follow `undo_next_lsn` to avoid duplicate compensation.
 5. **Process Crash Resiliency**: Genuine subprocess termination via `FaultInjector` confirms recovery restarts cleanly and completes from persistent `.wal` and `.db` files.
 6. **Buffer Pool Pin Safety**: All frames in the buffer pool are released (`pin_count == 0`) and clean (`is_dirty == False`) upon recovery completion.
+
+---
+
+# Phase 12: Synthetic Transaction Workload Generator Walkthrough
+
+## 1. Overview & Objectives
+
+Phase 12 established a configurable, reproducible synthetic transaction workload generator under `backend/app/workload/`:
+- [`backend/app/workload/config.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/config.py): `WorkloadConfig` parameters and distribution validation.
+- [`backend/app/workload/models.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/models.py): `OperationType`, `TransactionOutcome`, `WorkloadOperation`, `WorkloadPlan`, `WorkloadResult`.
+- [`backend/app/workload/generator.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/generator.py): `WorkloadGenerator` for deterministic plan generation with random seeds.
+- [`backend/app/workload/executor.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/executor.py): `WorkloadExecutor` exercising real database transactions, buffer frames, WAL logging, checkpoints, and crash-recovery experiments.
+- [`backend/app/workload/exceptions.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/exceptions.py): Domain-specific exception hierarchy.
+
+## 2. Workload Test Suite (17 Scenarios)
+
+All 17 verification scenarios in [`backend/tests/test_workload_generator.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_workload_generator.py) passed:
+
+| # | Scenario | Test Name | Key Invariants Verified | Status |
+|---|----------|-----------|--------------------------|--------|
+| 1 | Config validation | `test_01_config_validation_and_invalid_inputs` | Rejection of negative counts, out-of-bounds ratios, ratio sums != 1.0, bad types | PASSED |
+| 2 | Deterministic plan generation | `test_02_deterministic_plan_generation_fixed_seed` | Fixed config and seed produce identical operation plans | PASSED |
+| 3 | Seed differentiation | `test_03_different_seeds_produce_different_plans` | Distinct seeds generate distinct operations and targets | PASSED |
+| 4 | Valid mixed workload | `test_04_valid_read_update_workload` | Both reads and updates executed cleanly against database | PASSED |
+| 5 | Committed durability | `test_05_committed_transaction_durability` | 100% committed transaction updates durable on disk across restart | PASSED |
+| 6 | Aborted rollback | `test_06_aborted_transaction_rollback` | Aborted transactions roll back via CLRs restoring initial page patterns | PASSED |
+| 7 | Incomplete recovery | `test_07_incomplete_transactions_and_subsequent_recovery` | Uncommitted loser transactions rolled back by RecoveryManager | PASSED |
+| 8 | Interleaved execution | `test_08_interleaved_transactions` | Concurrent transaction operations interleaved safely without stuck pins | PASSED |
+| 9 | Multi-page operation | `test_09_workloads_operating_on_multiple_pages` | Uniform operation spread across 8 distinct pages with no cross-interference | PASSED |
+| 10 | Boundary workload sizes | `test_10_zero_operation_and_minimum_size_workloads` | Zero-transaction (0 ops) and minimum single-transaction (2 ops) execute safely | PASSED |
+| 11 | Multi-run reproducibility | `test_11_reproducibility_across_independent_runs` | Separate runs with identical seed generate byte-for-byte identical database files | PASSED |
+| 12 | Subprocess crash experiment | `test_12_crash_injection_and_restart_recovery` | Subprocess terminates at DURING_TRANSACTION_COMMIT and recovers from files | PASSED |
+| 13 | Result serialization | `test_13_result_counts_and_serialization` | WorkloadResult serialization, property immutability, and dict formatting | PASSED |
+| 14 | Execution failure safety | `test_14_invalid_execution_parameters_fail_safely` | Missing paths or unconfigured crash points raise clear errors without file corruption | PASSED |
+| 15 | API compatibility | `test_15_compatibility_with_existing_apis` | Seamless interoperability with CheckpointManager and RecoveryManager | PASSED |
+| 16 | Validator error detection | `test_16_validator_detects_disk_mismatch_and_recovery_failures` | Persistent disk byte mismatch, unallocated page, recovery failure, winner/loser discrepancy | PASSED |
+| 17 | Repeated updates rollback | `test_17_repeated_updates_same_page_and_rollback` | Multiple repeated updates on same page/slot rolled back via CLRs restoring baseline data | PASSED |
+
+## 3. Verified Correctness Invariants
+
+1. **Deterministic Separation**: Operation plan generation is purely deterministic and completely decoupled from execution side effects.
+2. **Durability & Atomicity**: Committed transactions permanently persist; aborted transactions roll back cleanly via CLRs at runtime; incomplete transactions roll back upon crash restart recovery.
+3. **No Uncommitted Overwrite Contention**: Slot-based page offset partitioning guarantees that concurrent uncommitted transactions do not create uncommitted dirty-write dependencies.
+4. **Buffer Pool Pin Safety**: Pin counts are strictly 0 and frames clean after execution across both normal and recovery paths.

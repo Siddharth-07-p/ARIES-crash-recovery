@@ -237,3 +237,46 @@ Implemented in [`backend/tests/test_integration_matrix.py`](file:///c:/Users/sid
 - Undo strictly follows transaction backward chains and logs CLRs prior to page writes.
 - Real subprocess crashes at fault points resume safely on restart.
 - Buffer pool pins are guaranteed 0 after recovery (no frame leaks).
+
+---
+
+# Phase 12: Synthetic Transaction Workload Generator — Implementation Plan
+
+## 1. Objective & Scope
+
+Implement a configurable, reproducible synthetic transaction workload generator exercising transaction control, page storage, buffer pool management, WAL logging, fuzzy checkpointing, crash injection, and ARIES recovery without bypassing existing database APIs.
+
+- Configurable parameters: transaction count, page count, operations per transaction, read/update mix, commit/abort/incomplete ratios, hotspot probability, interleaving probability, deterministic random seed.
+- Deterministic operation-plan generation separated from execution outcomes.
+- Execution on real database subsystems with strict pin safety and expected-state validation.
+- Subprocess crash experiments and restart recovery verification.
+- Immutable, encapsulated `WorkloadResult` serialization without benchmarking/monitoring clutter.
+
+## 2. Workload Architecture
+
+- [`backend/app/workload/config.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/config.py): `WorkloadConfig` with strict validation.
+- [`backend/app/workload/models.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/models.py): `OperationType`, `TransactionOutcome`, `WorkloadOperation`, `WorkloadPlan`, `WorkloadResult`.
+- [`backend/app/workload/generator.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/generator.py): `WorkloadGenerator` for deterministic plan generation.
+- [`backend/app/workload/executor.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/executor.py): `WorkloadExecutor` for execution, validation, and crash experimentation.
+- [`backend/app/workload/exceptions.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/workload/exceptions.py): Domain-specific exception hierarchy.
+
+## 3. Workload Test Suite (17 Scenarios)
+
+Implemented in [`backend/tests/test_workload_generator.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_workload_generator.py):
+1. Configuration validation and rejection of invalid inputs.
+2. Deterministic operation-plan generation using a fixed seed.
+3. Different seeds producing appropriately different plans.
+4. Valid mixed read/update workload execution.
+5. Committed transaction durability across restarts.
+6. Aborted transaction rollback with CLR logging.
+7. Incomplete transactions and subsequent restart recovery.
+8. Interleaved transaction scheduling and execution.
+9. Workloads operating across multiple pages without non-interference bugs.
+10. Zero-operation and minimum-size workloads.
+11. Reproducibility across independent test runs.
+12. Crash injection and restart recovery using persistent files.
+13. Result counts and immutability serialization.
+14. Invalid execution parameters failing safely.
+15. Compatibility with existing tests and public APIs.
+16. Expected-state validator detects disk mismatches, unallocated pages, and recovery discrepancies.
+17. Repeated updates by the same transaction to the same page and slot with full rollback.
