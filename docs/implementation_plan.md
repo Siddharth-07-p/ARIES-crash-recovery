@@ -374,3 +374,36 @@ Implemented in [`backend/tests/test_monitoring_api.py`](file:///c:/Users/siddh/O
 15. `test_15_error_handling_for_closed_components`: Safe metric extraction without raising `ClosedError` exceptions.
 16. `test_16_regression_coverage_for_existing_api_routes`: Root endpoint `/` and `/api/health` backward compatibility.
 17. `test_17_concurrency_and_closed_race_safety`: Thread-safe concurrent queries, exact eviction/free frame availability matching, and degraded status reporting upon recovery failure.
+
+---
+
+# Phase 15: React Monitoring Dashboard — Implementation Plan
+
+## 1. Objective & Scope
+
+Build a responsive, accessible React + TypeScript monitoring dashboard that consumes the Phase 14 monitoring REST endpoints (`/api/monitoring/*` and `/api/health`).
+- Expose engine health, transaction metrics, WAL progress, buffer frame allocation, crash recovery stages, synthetic workload summaries, and benchmark throughput.
+- Keep the dashboard strictly read-only; never imply that GET requests trigger transactions, recovery, workloads, or benchmarks.
+- Cleanly handle unavailable states, uninitialized managers, and partial network/endpoint failures without crashing or fabricating zeros.
+- Provide automatic periodic polling (with configurable intervals) and on-demand manual refresh with cancellation and overlapping request protection.
+
+## 2. Frontend Architecture & Component Structure
+
+- [`frontend/src/types.ts`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/types.ts): TypeScript interfaces matching backend models (`MonitoringStatusResponse`, `TransactionStatisticsResponse`, `WALStatisticsResponse`, `BufferPoolStatisticsResponse`, `RecoveryStatisticsResponse`, `WorkloadSummaryResponse`, `BenchmarkSummaryResponse`, `HealthResponse`).
+- [`frontend/src/hooks/useMonitoringData.ts`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/hooks/useMonitoringData.ts): Custom React hook using `Promise.allSettled`, `AbortController` cancellation, `isFetchingRef` overlap guards, and configurable polling timers.
+- [`frontend/src/components/StatusBadge.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/StatusBadge.tsx): Semantic status pill with color-coded dot and labels for operational, degraded, uninitialized, recovered, failed, not-run, and closed conditions.
+- [`frontend/src/components/MetricCard.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/MetricCard.tsx): Reusable metric display card with label, value, unit, subtext, icon, shimmer loading, and explicit `—` representation for missing values.
+- [`frontend/src/components/OverviewSection.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/OverviewSection.tsx): Engine header, service status, initialization flag, recovery lifecycle badge, poll interval selector, and manual refresh controls.
+- [`frontend/src/components/TransactionSection.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/TransactionSection.tsx): Started, committed, aborted, and active transaction counts, plus active transaction ID chips.
+- [`frontend/src/components/WalSection.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/WalSection.tsx): Current LSN, flushed LSN, sync lag, total record count, formatted WAL file size (B, KB, MB), and open/closed status.
+- [`frontend/src/components/BufferPoolSection.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/BufferPoolSection.tsx): Frame capacity, resident pages, pinned frames, dirty pages, available frames, and visual memory footprint bar.
+- [`frontend/src/components/RecoverySection.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/RecoverySection.tsx): Recovery status (Not Run, Recovered, Failed), stage, winner/loser counts, redo/undo counts, CLRs generated, pages modified, and monotonic stage timing breakdown.
+- [`frontend/src/components/WorkloadSection.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/WorkloadSection.tsx): Operations executed/planned, read/update mix, transaction outcomes, correctness validation badge, and fault point status.
+- [`frontend/src/components/BenchmarkSection.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/components/BenchmarkSection.tsx): Scenario name, pass/fail status, run counts, transaction throughput (TPS), operation throughput (ops/sec), and mean durations.
+- [`frontend/src/App.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/App.tsx): Main dashboard layout assembling header, overview, 2-column responsive dashboard grid, and footer.
+- [`frontend/src/App.css`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/App.css): Dark theme styles, glassmorphism cards, responsive layouts, and accessibility focus rings.
+
+## 3. Verification & Quality Gates
+
+- Production build verification via `npm run build` (`tsc && vite build`).
+- Full backend regression verification via `pytest` (all 276 tests passing).

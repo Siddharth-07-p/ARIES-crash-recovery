@@ -1,238 +1,100 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { 
-  Database, 
-  Activity, 
-  RefreshCw, 
-  Layers, 
-  HardDrive, 
-  FileText, 
-  ShieldCheck, 
-  Zap, 
-  CheckCircle2, 
-  AlertCircle 
-} from 'lucide-react';
-import { HealthResponse, ConnectionStatus } from './types';
+import React, { useState } from 'react';
+import { Database } from 'lucide-react';
+import BenchmarkSection from './components/BenchmarkSection';
+import BufferPoolSection from './components/BufferPoolSection';
+import OverviewSection from './components/OverviewSection';
+import RecoverySection from './components/RecoverySection';
+import StatusBadge from './components/StatusBadge';
+import TransactionSection from './components/TransactionSection';
+import WalSection from './components/WalSection';
+import WorkloadSection from './components/WorkloadSection';
+import { useMonitoringData } from './hooks/useMonitoringData';
 import './App.css';
 
 export const App: React.FC = () => {
-  const [status, setStatus] = useState<ConnectionStatus>('checking');
-  const [healthData, setHealthData] = useState<HealthResponse | null>(null);
-  const [lastChecked, setLastChecked] = useState<Date | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [pollIntervalMs, setPollIntervalMs] = useState<number>(10000);
+  const { data, refresh } = useMonitoringData(pollIntervalMs);
 
-  const checkHealth = useCallback(async () => {
-    setIsRefreshing(true);
-    try {
-      // Fetch from relative /api/health (routed via Vite proxy or direct)
-      const res = await fetch('/api/health');
-      if (!res.ok) {
-        throw new Error(`HTTP error! status: ${res.status}`);
-      }
-      const data: HealthResponse = await res.json();
-      setHealthData(data);
-      setStatus('connected');
-      setErrorMsg(null);
-    } catch (err: unknown) {
-      console.error('Failed to connect to backend:', err);
-      setStatus('disconnected');
-      setHealthData(null);
-      setErrorMsg(err instanceof Error ? err.message : 'Connection failed');
-    } finally {
-      setLastChecked(new Date());
-      setIsRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    checkHealth();
-    // Poll every 10 seconds for seamless development monitoring
-    const interval = setInterval(checkHealth, 10000);
-    return () => clearInterval(interval);
-  }, [checkHealth]);
-
-  const roadmapItems = [
-    {
-      phase: 'Phase 0',
-      title: 'Project Setup & Architecture',
-      desc: 'Python FastAPI backend foundation, React TypeScript frontend, testing and health verification.',
-      status: 'Current Phase',
-      icon: <CheckCircle2 size={18} className="text-emerald" />,
-      active: true,
-    },
-    {
-      phase: 'Phase 1',
-      title: 'Page-Based Persistent Storage',
-      desc: 'Slotted page architecture, disk manager, binary serialization, and file I/O.',
-      status: 'Upcoming',
-      icon: <HardDrive size={18} />,
-      active: false,
-    },
-    {
-      phase: 'Phase 2',
-      title: 'Buffer Pool Manager',
-      desc: 'Frame pool, replacement policies (Clock/LRU), Dirty Page Table (DPT) & recLSN tracking.',
-      status: 'Upcoming',
-      icon: <Layers size={18} />,
-      active: false,
-    },
-    {
-      phase: 'Phase 3',
-      title: 'Write-Ahead Logging (WAL)',
-      desc: 'Append-only log records, LSN sequence numbering, pageLSN, and fuzzy checkpoints.',
-      status: 'Upcoming',
-      icon: <FileText size={18} />,
-      active: false,
-    },
-    {
-      phase: 'Phase 4',
-      title: 'Transaction Manager',
-      desc: 'ACID transaction states, Transaction Table, commit/abort protocols.',
-      status: 'Upcoming',
-      icon: <Zap size={18} />,
-      active: false,
-    },
-    {
-      phase: 'Phase 5',
-      title: 'ARIES Recovery Engine',
-      desc: 'Analysis pass, Redo pass (repeating history), Undo pass, and Compensation Log Records (CLRs).',
-      status: 'Upcoming',
-      icon: <ShieldCheck size={18} />,
-      active: false,
-    },
-  ];
+  const statusData = data.status.data;
+  const isOffline = data.health.error !== null && data.status.error !== null;
+  const overallStatus = isOffline
+    ? 'disconnected'
+    : statusData?.status || 'uninitialized';
 
   return (
     <div className="app-container">
-      {/* Header */}
-      <header className="app-header">
+      {/* Top Header */}
+      <header className="app-header" role="banner">
         <div className="header-content">
           <div className="logo-section">
-            <div className="logo-icon">
+            <div className="logo-icon" aria-hidden="true">
               <Database size={24} />
             </div>
             <div>
               <h1 className="logo-title">ARIES Crash Recovery System</h1>
-              <span className="logo-subtitle">Database Internals & Recovery Engine</span>
+              <span className="logo-subtitle">
+                Database Internals & Observability Dashboard
+              </span>
             </div>
           </div>
 
-          <div
-            id="backend-status-indicator"
-            className={`status-pill ${status}`}
-          >
-            <span className="status-dot"></span>
-            <span>
-              {status === 'connected' && 'Backend: Connected'}
-              {status === 'disconnected' && 'Backend: Not Connected'}
-              {status === 'checking' && 'Backend: Connecting...'}
-            </span>
+          <div className="header-status-group">
+            <StatusBadge
+              status={overallStatus}
+              className="header-status-badge"
+            />
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="main-content">
-        {/* Hero & Connection Dashboard Card */}
-        <section className="hero-card">
-          <div className="hero-header">
-            <div>
-              <div className="hero-badge">Phase 0 Foundation</div>
-              <h2 className="hero-title">System Status & Architectural Foundation</h2>
-              <p className="hero-desc">
-                Welcome to the ARIES Crash Recovery development dashboard. Phase 0 establishes the
-                communication pipeline between the React/TypeScript frontend and the FastAPI backend.
-              </p>
-            </div>
-            <button
-              id="refresh-health-btn"
-              onClick={checkHealth}
-              disabled={isRefreshing}
-              className="refresh-btn"
-              title="Refresh backend status"
-            >
-              <RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />
-              <span>{isRefreshing ? 'Checking...' : 'Check Status'}</span>
-            </button>
+      {/* Main Content Area */}
+      <main className="main-content" role="main">
+        {/* System Overview & Health Banner */}
+        <OverviewSection
+          health={data.health}
+          status={data.status}
+          lastSuccessfulRefresh={data.lastSuccessfulRefresh}
+          isRefreshing={data.isRefreshing}
+          onRefresh={refresh}
+          pollIntervalMs={pollIntervalMs}
+          onIntervalChange={setPollIntervalMs}
+        />
+
+        {/* Dashboard Grid Sections */}
+        <div className="dashboard-grid">
+          {/* Transaction & WAL Column */}
+          <div className="grid-column">
+            <TransactionSection transactions={data.transactions} />
+            <WalSection wal={data.wal} />
           </div>
 
-          <div className="health-panel">
-            <div className="metric-box">
-              <div className="metric-label">Backend Status</div>
-              <div className="metric-value">
-                {status === 'connected' ? (
-                  <span style={{ color: 'var(--accent-emerald)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <CheckCircle2 size={16} /> Online
-                  </span>
-                ) : status === 'disconnected' ? (
-                  <span style={{ color: 'var(--accent-rose)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <AlertCircle size={16} /> Offline
-                  </span>
-                ) : (
-                  <span style={{ color: 'var(--accent-amber)' }}>Probing...</span>
-                )}
-              </div>
-            </div>
-
-            <div className="metric-box">
-              <div className="metric-label">Service Name</div>
-              <div className="metric-value">
-                {healthData?.service || (status === 'disconnected' ? 'Unavailable' : 'Loading...')}
-              </div>
-            </div>
-
-            <div className="metric-box">
-              <div className="metric-label">Backend Version</div>
-              <div className="metric-value">
-                {healthData?.version ? `v${healthData.version}` : 'N/A'}
-              </div>
-            </div>
-
-            <div className="metric-box">
-              <div className="metric-label">Last Health Ping</div>
-              <div className="metric-value">
-                {lastChecked ? lastChecked.toLocaleTimeString() : 'Never'}
-              </div>
-            </div>
+          {/* Buffer Pool & Recovery Column */}
+          <div className="grid-column">
+            <BufferPoolSection bufferPool={data.bufferPool} />
+            <RecoverySection recovery={data.recovery} />
           </div>
+        </div>
 
-          {errorMsg && (
-            <div style={{ marginTop: '1rem', color: 'var(--accent-rose)', fontSize: '0.85rem' }}>
-              Error: {errorMsg} (Ensure FastAPI backend is running on port 8000)
-            </div>
-          )}
-        </section>
-
-        {/* Roadmap / Architecture Preview Section */}
-        <section>
-          <h3 className="section-title">
-            <Activity size={20} style={{ color: 'var(--accent-indigo)' }} />
-            <span>Implementation Roadmap</span>
-          </h3>
-
-          <div className="roadmap-grid">
-            {roadmapItems.map((item, index) => (
-              <div
-                key={index}
-                className={`phase-card ${item.active ? 'active' : ''}`}
-              >
-                <div className="phase-top">
-                  <span className="phase-tag">{item.phase}</span>
-                  <span className={`phase-badge ${item.active ? 'current' : ''}`}>
-                    {item.status}
-                  </span>
-                </div>
-                <h4 className="phase-title">{item.title}</h4>
-                <p className="phase-desc">{item.desc}</p>
-              </div>
-            ))}
+        {/* Workload and Benchmark Full-Width Row */}
+        <div className="dashboard-grid full-width-grid">
+          <div className="grid-column">
+            <WorkloadSection workload={data.workload} />
           </div>
-        </section>
+          <div className="grid-column">
+            <BenchmarkSection benchmark={data.benchmark} />
+          </div>
+        </div>
       </main>
 
       {/* Footer */}
-      <footer className="app-footer">
-        ARIES-Inspired Database Crash Recovery System &mdash; Phase 0 Foundation
+      <footer className="app-footer" role="contentinfo">
+        <div className="footer-content">
+          <span>
+            ARIES (Algorithms for Recovery and Isolation Exploiting Semantics) Database Engine
+          </span>
+          <span className="footer-dot">•</span>
+          <span>Phases 0–15 Verified & Integrated</span>
+        </div>
       </footer>
     </div>
   );

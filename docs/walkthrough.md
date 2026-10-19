@@ -545,3 +545,82 @@ All 17 verification scenarios in [`backend/tests/test_monitoring_api.py`](file:/
 2. **Path Sanitization**: Monitoring endpoints accept no client-supplied file paths or filesystem scan requests, preventing path traversal vulnerabilities.
 3. **No Unauthenticated Secret Leakage**: No server host paths, credentials, or internal memory addresses are serialized.
 4. **Resilience to Closed Subsystems**: If a subsystem manager is closed or uninitialized, endpoints return documented degraded/uninitialized states rather than throwing unhandled `500 Internal Server Error` exceptions.
+
+---
+
+# Phase 15: React Monitoring Dashboard — Walkthrough
+
+## Overview
+
+Phase 15 implements a responsive, accessible React + TypeScript monitoring dashboard for the ARIES Crash Recovery project. Built on top of React 18, Vite, TypeScript, and Lucide React icons, the dashboard consumes all seven Phase 14 monitoring endpoints (`/api/monitoring/*`) as well as the `/api/health` probe without mutating backend state, fabricating missing metrics, or triggering heavy database operations.
+
+---
+
+## 1. Dashboard Architecture and Component Hierarchy
+
+The frontend architecture separates network polling, data normalization, status evaluation, and UI rendering:
+
+```
+App.tsx
+├── Header (App title, Live indicator, ARIES Architecture badges)
+├── OverviewSection (Engine status, DB init state, Recovery status, Poll interval selector, Manual refresh, Offline banner)
+└── Dashboard Grid (2-column responsive layout)
+    ├── Left Column
+    │   ├── TransactionSection (Active tx list, Started/Committed/Aborted cards)
+    │   ├── WalSection (LSN progression, Sync lag, Records count, File size)
+    │   └── BufferPoolSection (Pool capacity, Resident/Pinned/Dirty/Free frames, Frame breakdown bar)
+    └── Right Column
+        ├── RecoverySection (Status banner, Winners/Losers, Redo/Undo stats, Stage durations)
+        ├── WorkloadSection (Operation counts, Read/Update breakdown, Validation badge, Fault status)
+        └── BenchmarkSection (Scenario info, Throughput [TPS, ops/s], Latency, Run counts)
+```
+
+Reusable presentation components:
+- **`MetricCard`**: Standardized card rendering metric labels, formatted values, units, supplementary hints, and shimmer skeleton states. Renders `—` when values are nullish.
+- **`StatusBadge`**: Semantic pill badges with pulsing/static color-coded dots representing system health (`operational`, `degraded`, `uninitialized`), recovery outcomes (`recovered`, `failed`, `not_run`), availability (`available`, `not_available`), and file handles (`open`, `closed`).
+
+---
+
+## 2. Endpoint-to-Component Mapping
+
+| API Endpoint | Response Type | Target Component | Displayed Metrics |
+|---|---|---|---|
+| `GET /api/health` | `HealthResponse` | `OverviewSection` | Backend connectivity, service status (`healthy`/`unhealthy`) |
+| `GET /api/monitoring/status` | `MonitoringStatusResponse` | `OverviewSection` | Overall status (`operational`, `degraded`, `uninitialized`), database initialized boolean, recovery status |
+| `GET /api/monitoring/transactions` | `TransactionStatisticsResponse` | `TransactionSection` | Total started, committed, aborted, active transactions, list of active Tx IDs |
+| `GET /api/monitoring/wal` | `WALStatisticsResponse` | `WalSection` | Current LSN, flushed LSN, sync lag, total records, WAL file size (B/KB/MB), file status |
+| `GET /api/monitoring/buffer-pool` | `BufferPoolStatisticsResponse` | `BufferPoolSection` | Frame capacity, resident pages, pinned frames, dirty pages, available frames, memory frame bar |
+| `GET /api/monitoring/recovery` | `RecoveryStatisticsResponse` | `RecoverySection` | Recovery status (`recovered`, `failed`, `not_run`), winner/loser Tx IDs, records redone, CLRs generated, updates undone, modified pages, stage durations (µs/ms/s), error details |
+| `GET /api/monitoring/workload` | `WorkloadSummaryResponse` | `WorkloadSection` | Workload status, planned vs executed ops, reads/updates mix, tx commit/abort/incomplete counts, correctness validation, crash injection status |
+| `GET /api/monitoring/benchmark` | `BenchmarkSummaryResponse` | `BenchmarkSection` | Benchmark status, scenario name, success flag, measured/warmup runs, tx throughput (TPS), op throughput (ops/sec), mean workload/recovery durations |
+
+---
+
+## 3. Polling, Resilience, and Lifecycle Invariants
+
+The `useMonitoringData` custom React hook (`frontend/src/hooks/useMonitoringData.ts`) enforces database monitoring guarantees:
+
+1. **Independent Subsystem Isolation**: Each of the 8 endpoints is queried concurrently via `Promise.allSettled`. If one endpoint fails (e.g., WAL manager temporarily uninitialized or closed), its card displays an error/degraded state while the remaining components continue to refresh normally.
+2. **Request Overlap Guard**: An `isFetchingRef` guard prevents slow network responses from stacking requests if a refresh cycle takes longer than the configured interval.
+3. **In-Flight Cancellation**: An `AbortController` signal is passed to all fetch requests. Component unmount or trigger of a new poll cycle aborts existing pending requests immediately, preventing memory leaks and state updates on unmounted trees.
+4. **Interval Customization**: The dashboard supports configurable polling intervals: `Paused`, `5 seconds`, `10 seconds` (default), and `30 seconds`, plus manual refresh controls.
+5. **No Data Fabrication**: Uninitialized or unavailable fields (`null` or `undefined`) are rendered as `—` rather than zero, preventing misinterpretation of missing instrumentation as zero values.
+6. **Read-Only Invariant**: All requests are strictly HTTP `GET` queries that never trigger recovery, workload execution, or benchmark runs.
+
+---
+
+## 4. Verification and Visual Checks
+
+### 1. Frontend Build Verification
+Executed in `frontend/`:
+```bash
+npm run build
+```
+- **Result**: `tsc` completed with 0 errors; Vite bundled production distribution into `dist/` (187.97 kB JS, 13.91 kB CSS) in 3.66s.
+
+### 2. Backend Regression Suite Verification
+Executed in project root:
+```bash
+.venv\Scripts\pytest -v
+```
+- **Result**: 276 passed in 19.49s. Zero regressions across storage, WAL, transactions, buffer pool, checkpoints, analysis, redo, undo, recovery manager, integration matrix, workload generator, benchmarking, and monitoring APIs.
