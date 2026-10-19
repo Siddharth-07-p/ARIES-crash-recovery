@@ -2,8 +2,9 @@
 
 from typing import Any, Dict, List, Optional, Union
 from app.checkpoint.checkpoint import CheckpointInfo
-from app.recovery.exceptions import AnalysisError, RedoError
+from app.recovery.exceptions import AnalysisError, RedoError, UndoError
 from app.transaction.transaction import TransactionState
+
 
 
 class RecoveredTransaction:
@@ -354,3 +355,160 @@ class RedoResult:
             f"skipped={self._records_skipped}, pages_modified={self._pages_modified})"
         )
 
+
+class UndoResult:
+    """Encapsulates the complete result of the ARIES Undo recovery phase.
+
+    Attributes:
+        loser_transactions: Total number of loser transactions identified.
+        transactions_undone: Number of transactions successfully rolled back.
+        clrs_generated: Number of Compensation Log Records (CLRs) written.
+        updates_undone: Number of UPDATE log records undone.
+        pages_modified: Sorted list of unique page IDs modified during Undo.
+        records_skipped: Number of records skipped (CLRs or non-undo records).
+        last_processed_lsn: Most recent/highest LSN processed during Undo (or None).
+        completed_transactions: Sorted list of transaction IDs that completed rollback.
+        remaining_losers: Sorted list of loser transaction IDs remaining (empty if complete).
+        is_complete: True if all loser transactions were successfully undone.
+    """
+
+    __slots__ = (
+        "_loser_transactions",
+        "_transactions_undone",
+        "_clrs_generated",
+        "_updates_undone",
+        "_pages_modified",
+        "_records_skipped",
+        "_last_processed_lsn",
+        "_completed_transactions",
+        "_remaining_losers",
+        "_is_complete",
+    )
+
+    def __init__(
+        self,
+        loser_transactions: int = 0,
+        transactions_undone: int = 0,
+        clrs_generated: int = 0,
+        updates_undone: int = 0,
+        pages_modified: Optional[List[int]] = None,
+        records_skipped: int = 0,
+        last_processed_lsn: Optional[int] = None,
+        completed_transactions: Optional[List[int]] = None,
+        remaining_losers: Optional[List[int]] = None,
+        is_complete: bool = True,
+    ) -> None:
+        """Initialize immutable UndoResult."""
+        if not isinstance(loser_transactions, int) or isinstance(loser_transactions, bool) or loser_transactions < 0:
+            raise UndoError(f"loser_transactions must be a non-negative integer, got {loser_transactions!r}")
+        if not isinstance(transactions_undone, int) or isinstance(transactions_undone, bool) or transactions_undone < 0:
+            raise UndoError(f"transactions_undone must be a non-negative integer, got {transactions_undone!r}")
+        if not isinstance(clrs_generated, int) or isinstance(clrs_generated, bool) or clrs_generated < 0:
+            raise UndoError(f"clrs_generated must be a non-negative integer, got {clrs_generated!r}")
+        if not isinstance(updates_undone, int) or isinstance(updates_undone, bool) or updates_undone < 0:
+            raise UndoError(f"updates_undone must be a non-negative integer, got {updates_undone!r}")
+        if not isinstance(records_skipped, int) or isinstance(records_skipped, bool) or records_skipped < 0:
+            raise UndoError(f"records_skipped must be a non-negative integer, got {records_skipped!r}")
+        if last_processed_lsn is not None and (not isinstance(last_processed_lsn, int) or isinstance(last_processed_lsn, bool) or last_processed_lsn <= 0):
+            raise UndoError(f"last_processed_lsn must be a positive integer or None, got {last_processed_lsn!r}")
+
+        self._loser_transactions: int = loser_transactions
+        self._transactions_undone: int = transactions_undone
+        self._clrs_generated: int = clrs_generated
+        self._updates_undone: int = updates_undone
+        self._pages_modified: List[int] = sorted(list(set(pages_modified))) if pages_modified is not None else []
+        self._records_skipped: int = records_skipped
+        self._last_processed_lsn: Optional[int] = last_processed_lsn
+        self._completed_transactions: List[int] = sorted(list(set(completed_transactions))) if completed_transactions is not None else []
+        self._remaining_losers: List[int] = sorted(list(set(remaining_losers))) if remaining_losers is not None else []
+        self._is_complete: bool = bool(is_complete)
+
+    @property
+    def loser_transactions(self) -> int:
+        """Return the total number of loser transactions identified."""
+        return self._loser_transactions
+
+    @property
+    def transactions_undone(self) -> int:
+        """Return the number of transactions successfully undone."""
+        return self._transactions_undone
+
+    @property
+    def clrs_generated(self) -> int:
+        """Return the number of CLRs generated."""
+        return self._clrs_generated
+
+    @property
+    def updates_undone(self) -> int:
+        """Return the number of UPDATE records undone."""
+        return self._updates_undone
+
+    @property
+    def pages_modified(self) -> List[int]:
+        """Return a copy of the sorted list of unique modified page IDs."""
+        return list(self._pages_modified)
+
+    @property
+    def records_skipped(self) -> int:
+        """Return the number of records skipped."""
+        return self._records_skipped
+
+    @property
+    def last_processed_lsn(self) -> Optional[int]:
+        """Return the most recent/highest LSN processed during Undo."""
+        return self._last_processed_lsn
+
+    @property
+    def completed_transactions(self) -> List[int]:
+        """Return a copy of the sorted list of completed transaction IDs."""
+        return list(self._completed_transactions)
+
+    @property
+    def remaining_losers(self) -> List[int]:
+        """Return a copy of the sorted list of remaining loser transaction IDs."""
+        return list(self._remaining_losers)
+
+    @property
+    def is_complete(self) -> bool:
+        """Return True if all loser transactions were successfully undone."""
+        return self._is_complete
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert undo result to dictionary format."""
+        return {
+            "loser_transactions": self._loser_transactions,
+            "transactions_undone": self._transactions_undone,
+            "clrs_generated": self._clrs_generated,
+            "updates_undone": self._updates_undone,
+            "pages_modified": list(self._pages_modified),
+            "records_skipped": self._records_skipped,
+            "last_processed_lsn": self._last_processed_lsn,
+            "completed_transactions": list(self._completed_transactions),
+            "remaining_losers": list(self._remaining_losers),
+            "is_complete": self._is_complete,
+        }
+
+    def __eq__(self, other: object) -> bool:
+        """Equality check."""
+        if not isinstance(other, UndoResult):
+            return False
+        return (
+            self._loser_transactions == other._loser_transactions
+            and self._transactions_undone == other._transactions_undone
+            and self._clrs_generated == other._clrs_generated
+            and self._updates_undone == other._updates_undone
+            and self._pages_modified == other._pages_modified
+            and self._records_skipped == other._records_skipped
+            and self._last_processed_lsn == other._last_processed_lsn
+            and self._completed_transactions == other._completed_transactions
+            and self._remaining_losers == other._remaining_losers
+            and self._is_complete == other._is_complete
+        )
+
+    def __repr__(self) -> str:
+        """String representation."""
+        return (
+            f"UndoResult(losers={self._loser_transactions}, undone={self._transactions_undone}, "
+            f"clrs={self._clrs_generated}, updates_undone={self._updates_undone}, "
+            f"pages_modified={self._pages_modified}, complete={self._is_complete})"
+        )

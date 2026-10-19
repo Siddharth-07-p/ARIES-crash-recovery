@@ -1,6 +1,6 @@
 """ARIES Analysis Phase implementation for database crash recovery."""
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 from app.checkpoint.checkpoint import CheckpointInfo, CheckpointSnapshot
 from app.checkpoint.checkpoint_manager import CheckpointManager
 from app.checkpoint.exceptions import CheckpointCorruptionError
@@ -83,6 +83,50 @@ class Analysis:
 
         return None
 
+    def _is_transaction_rollback_incomplete(self, tx_id: int, last_lsn: Optional[int]) -> bool:
+        """Determine if an aborted transaction has uncompensated updates requiring Undo.
+
+        In ARIES, an ABORT log record indicates the decision/start of abort, but does
+        not prove that physical rollback finished. A transaction's rollback is complete
+        only if:
+            1. It never executed any UPDATE records, OR
+            2. All of its UPDATE records have already been compensated by CLR records,
+               culminating in a final completion/abort record.
+
+        We trace the transaction log chain backwards:
+            - If we encounter an UPDATE record: that update was never undone -> incomplete.
+            - If we encounter a CLR: follow its undo_next_lsn.
+              If undo_next_lsn is None or points to a BEGIN record: all updates undone -> complete.
+              If undo_next_lsn points to an UPDATE: that update still needs undo -> incomplete.
+            - If we encounter an ABORT record: follow its prev_lsn.
+            - If we reach BEGIN or None without uncompensated UPDATEs: -> complete.
+        """
+        curr_lsn = last_lsn
+        visited: Set[int] = set()
+        while curr_lsn is not None:
+            if curr_lsn in visited:
+                break
+            visited.add(curr_lsn)
+            rec = self._log_manager.get_log_record(curr_lsn)
+            if rec is None:
+                # If record is missing in WAL during analysis, safely treat as incomplete
+                return True
+            if rec.record_type == LogRecordType.UPDATE:
+                return True
+            elif rec.record_type == LogRecordType.CLR:
+                if rec.undo_next_lsn is None:
+                    return False
+                if rec.undo_next_lsn >= curr_lsn:
+                    return True
+                curr_lsn = rec.undo_next_lsn
+            elif rec.record_type == LogRecordType.BEGIN:
+                return False
+            else:
+                if rec.prev_lsn is not None and rec.prev_lsn >= curr_lsn:
+                    return True
+                curr_lsn = rec.prev_lsn
+        return False
+
     def execute(self) -> AnalysisResult:
         """Execute the ARIES Analysis algorithm and return the reconstructed recovery state."""
         checkpoint = self._discover_latest_checkpoint()
@@ -127,7 +171,7 @@ class Analysis:
                     last_lsn=rec.lsn,
                 )
 
-            elif rec_type == LogRecordType.UPDATE:
+            elif rec_type in (LogRecordType.UPDATE, LogRecordType.CLR):
                 assert tx_id is not None
                 assert rec.page_id is not None
 
@@ -145,6 +189,7 @@ class Analysis:
                 page_id = rec.page_id
                 if page_id not in dpt:
                     dpt[page_id] = rec.lsn
+
 
             elif rec_type == LogRecordType.COMMIT:
                 assert tx_id is not None

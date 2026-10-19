@@ -18,7 +18,7 @@ TYPE_CODE_ABORT = 3
 TYPE_CODE_UPDATE = 4
 TYPE_CODE_CHECKPOINT_BEGIN = 5
 TYPE_CODE_CHECKPOINT_END = 6
+TYPE_CODE_CLR = 7
 
 # Minimum record size: 4 (magic) + 4 (len) + 8 (lsn) + 8 (prev_lsn) + 8 (tx_id) + 1 (type) + 4 (crc) = 37
 MIN_RECORD_SIZE = 37
-

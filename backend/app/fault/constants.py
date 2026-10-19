@@ -26,3 +26,12 @@ class FaultPoint(str, Enum):
 
     # Triggered after CHECKPOINT_END is written and flushed
     CHECKPOINT_END = "CHECKPOINT_END"
+
+    # Triggered during recovery Undo before the CLR is flushed to disk
+    DURING_UNDO_BEFORE_CLR_FLUSH = "DURING_UNDO_BEFORE_CLR_FLUSH"
+
+    # Triggered during recovery Undo after CLR is flushed to disk, but before modified page is flushed
+    DURING_UNDO_AFTER_CLR_FLUSH_BEFORE_PAGE_FLUSH = "DURING_UNDO_AFTER_CLR_FLUSH_BEFORE_PAGE_FLUSH"
+
+    # Triggered during recovery Undo after the modified page is flushed to disk
+    DURING_UNDO_AFTER_PAGE_FLUSH = "DURING_UNDO_AFTER_PAGE_FLUSH"

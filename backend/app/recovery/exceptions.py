@@ -11,3 +11,7 @@ class AnalysisError(RecoveryError):
 
 class RedoError(RecoveryError):
     """Raised when an error occurs during the ARIES Redo phase."""
+
+
+class UndoError(RecoveryError):
+    """Raised when an error occurs during the ARIES Undo phase."""

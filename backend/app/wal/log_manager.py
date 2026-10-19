@@ -255,7 +255,43 @@ class LogManager:
         )
         return self.append_log(record)
 
+    def append_clr(
+        self,
+        transaction_id: int,
+        page_id: int,
+        offset: int,
+        undo_next_lsn: Optional[int],
+        compensation_image: Union[bytes, bytearray, memoryview],
+    ) -> int:
+        """Append a CLR (Compensation Log Record) for a transaction undo step.
+
+        Args:
+            transaction_id: Unique positive transaction identifier.
+            page_id: Target page ID compensated.
+            offset: Byte offset within the page.
+            undo_next_lsn: Next LSN to undo for this transaction (or None).
+            compensation_image: Raw bytes restoring before-image.
+
+        Returns:
+            The allocated LSN.
+        """
+        self._check_open()
+        lsn = self._next_lsn
+        prev_lsn = self._tx_last_lsn.get(transaction_id)
+        record = LogRecord(
+            lsn=lsn,
+            record_type=LogRecordType.CLR,
+            transaction_id=transaction_id,
+            prev_lsn=prev_lsn,
+            page_id=page_id,
+            offset=offset,
+            after_image=compensation_image,
+            undo_next_lsn=undo_next_lsn,
+        )
+        return self.append_log(record)
+
     def append_checkpoint_begin(self) -> int:
+
         """Append a CHECKPOINT_BEGIN log record.
 
         Returns:

@@ -90,14 +90,14 @@ class Redo:
             records_scanned += 1
             last_scanned_lsn = record.lsn
 
-            # 1. Only UPDATE records are candidates for Redo
-            if record.record_type != LogRecordType.UPDATE:
+            # 1. UPDATE and CLR records are candidates for Redo
+            if record.record_type not in (LogRecordType.UPDATE, LogRecordType.CLR):
                 records_skipped += 1
                 continue
 
             page_id = record.page_id
             if page_id is None:
-                raise RedoError(f"UPDATE record at LSN {record.lsn} is missing page_id")
+                raise RedoError(f"{record.record_type.value} record at LSN {record.lsn} is missing page_id")
 
             # 2. DPT filtering: check if page_id exists in DPT
             if page_id not in dpt:
@@ -117,30 +117,38 @@ class Redo:
             after_image = record.after_image
             if offset is None or after_image is None or offset < 0 or offset + len(after_image) > PAGE_SIZE:
                 raise RedoError(
-                    f"Invalid UPDATE bounds at LSN {record.lsn}: offset={offset}, "
+                    f"Invalid {record.record_type.value} bounds at LSN {record.lsn}: offset={offset}, "
                     f"after_image_len={len(after_image) if after_image is not None else None}, "
                     f"page_size={PAGE_SIZE}"
                 )
 
+
             # 5. Page-LSN test & Update Replay
             # Fetch the page into the buffer pool (increments pin count)
             page = self._buffer_manager.fetch_page(page_id)
-            current_page_lsn = self._buffer_manager.get_page_lsn(page_id)
+            try:
+                current_page_lsn = self._buffer_manager.get_page_lsn(page_id)
 
-            if current_page_lsn >= record.lsn:
-                # Page already contains this update (or a later update) -> skip
-                self._buffer_manager.unpin_page(page_id, is_dirty=False)
-                records_skipped += 1
-                pages_skipped.add(page_id)
-            else:
-                # Apply update
-                page.write(offset, after_image)
-                self._buffer_manager.set_page_lsn(page_id, record.lsn)
-                self._buffer_manager.unpin_page(page_id, is_dirty=True)
-                # Ensure page persistence
-                self._buffer_manager.flush_page(page_id)
-                records_redone += 1
-                pages_modified.add(page_id)
+                if current_page_lsn >= record.lsn:
+                    # Page already contains this update (or a later update) -> skip
+                    self._buffer_manager.unpin_page(page_id, is_dirty=False)
+                    records_skipped += 1
+                    pages_skipped.add(page_id)
+                else:
+                    # Apply update
+                    page.write(offset, after_image)
+                    self._buffer_manager.set_page_lsn(page_id, record.lsn)
+                    self._buffer_manager.unpin_page(page_id, is_dirty=True)
+                    # Ensure page persistence
+                    self._buffer_manager.flush_page(page_id)
+                    records_redone += 1
+                    pages_modified.add(page_id)
+            except Exception:
+                try:
+                    self._buffer_manager.unpin_page(page_id, is_dirty=False)
+                except Exception:
+                    pass
+                raise
 
         return RedoResult(
             redo_start_lsn=redo_start_lsn,
