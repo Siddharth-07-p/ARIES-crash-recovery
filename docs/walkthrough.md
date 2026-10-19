@@ -226,3 +226,55 @@ The test suite in [`backend/tests/test_recovery_manager.py`](file:///c:/Users/si
 | 17 | `test_recover_from_files_convenience_api` | RecoveryManager.recover_from_files opens, recovers, and closes | PASSED |
 | 18 | `test_constructor_validations_and_closed_managers` | Closed or None managers rejected with RecoveryManagerError | PASSED |
 | 19 | `test_crash_at_after_undo_before_complete_and_restart_recovery` | Subprocess crash at AFTER_UNDO_BEFORE_COMPLETE followed by restart | PASSED |
+
+---
+
+# Phase 11: ARIES Integration and Correctness Testing Walkthrough
+
+## 1. Overview & Objectives
+
+Phase 11 established a dedicated integration and correctness test matrix ([`backend/tests/test_integration_matrix.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_integration_matrix.py)) verifying end-to-end interactions across the entire database engine:
+- Storage (`DiskManager`)
+- Buffer pool (`BufferManager` with LRU eviction and pin safety)
+- Write-Ahead Logging (`LogManager` with LSNs and CRC32 checks)
+- Transaction control (`TransactionManager`)
+- Checkpointing (`CheckpointManager` with fuzzy snapshots)
+- Recovery phases (`Analysis`, `Redo`, `Undo` with CLRs)
+- Orchestration (`RecoveryManager` and `RecoveryResult`)
+- Crash fault injection (`FaultInjector`)
+
+## 2. Integration Test Matrix (20 Scenarios)
+
+All 20 required integration scenarios were executed and validated:
+
+| # | Integration Scenario | Test Name | Invariants Verified | Status |
+|---|----------------------|-----------|---------------------|--------|
+| 1 | Clean database | `test_scenario_01_clean_database_no_recovery_required` | Zero spurious work, clean state preserved | PASSED |
+| 2 | Committed transaction restart | `test_scenario_02_committed_transaction_survives_restart` | Committed updates never undone; replayed to disk | PASSED |
+| 3 | Incomplete transaction undo | `test_scenario_03_incomplete_transaction_undone` | Active uncommitted loser rolled back to before-image | PASSED |
+| 4 | Interleaved mixed transactions | `test_scenario_04_multiple_interleaved_transactions_mixed_outcomes` | Winners preserved, losers undone via priority queue | PASSED |
+| 5 | Multiple updates on same page | `test_scenario_05_multiple_updates_same_transaction_same_page` | Reverse-order rollback, valid CLR undoNextLSN chains | PASSED |
+| 6 | Disjoint pages isolation | `test_scenario_06_multiple_transactions_different_pages` | Non-interference across multiple pages | PASSED |
+| 7 | Multi-page transaction crash | `test_scenario_07_transaction_updating_multiple_pages` | Complete rollback across pages 0, 1, 2 | PASSED |
+| 8 | Valid checkpoint recovery | `test_scenario_08_recovery_with_valid_checkpoint` | Snapshot state loaded, scan begins from checkpoint begin | PASSED |
+| 9 | Incomplete checkpoint crash | `test_scenario_09_recovery_checkpoint_absent_or_incomplete` | Crash at CHECKPOINT_BEGIN ignored; log head scan used | PASSED |
+| 10 | Crash during Redo | `test_scenario_10_crash_during_redo_subprocess_restart` | Subprocess crash at AFTER_REDO_BEFORE_UNDO resumes | PASSED |
+| 11 | Crash during Undo | `test_scenario_11_crash_during_undo_subprocess_restart` | Subprocess crash mid-Undo resumes from durable CLR | PASSED |
+| 12 | Crash after CLR flush before page | `test_scenario_12_crash_after_clr_flush_before_page_flush_subprocess` | Redo replays CLR, Undo jumps to avoid double undo | PASSED |
+| 13 | Crash after Undo complete | `test_scenario_13_crash_after_undo_before_complete_subprocess` | Subprocess crash at AFTER_UNDO_BEFORE_COMPLETE resumes | PASSED |
+| 14 | Repeated recovery idempotence | `test_scenario_14_repeated_recovery_idempotence` | Subsequent runs perform 0 redo/undo, state identical | PASSED |
+| 15 | Corrupted WAL & cyclic chains | `test_scenario_15_corrupted_wal_and_invalid_lsn_chains` | LogCorruptionError & cyclic UndoError reported | PASSED |
+| 16 | Invalid bounds / page refs | `test_scenario_16_invalid_transaction_or_page_references` | Bounds overflow & non-existent page fail safely | PASSED |
+| 17 | Failures at each stage | `test_scenario_17_recovery_failures_at_each_stage` | FAILED_AT_ANALYSIS, REDO, UNDO precisely recorded | PASSED |
+| 18 | File-based restart recovery | `test_scenario_18_file_based_recovery_across_restarts` | `recover_from_files` lifecycle across processes | PASSED |
+| 19 | Buffer pin safety | `test_scenario_19_buffer_pool_pin_safety_and_page_consistency` | Pin count == 0 and is_dirty == False for all frames | PASSED |
+| 20 | Public API compatibility | `test_scenario_20_public_apis_and_backward_compatibility` | Standalone and classmethods fully operational | PASSED |
+
+## 3. Verified ARIES Invariants
+
+1. **Committed Transactions Durability**: Committed transactions are never undone during recovery, and their unflushed updates are guaranteed persisted to disk by Redo.
+2. **Incomplete Transactions Atomicity**: Loser transactions are completely rolled back using recorded before-images, terminating with durable `ABORT` records.
+3. **Repeatable Redo**: Redo scans from `redo_start_lsn` and applies all eligible updates idempotently, skipping pages where `page_lsn >= record.lsn`.
+4. **Compensation Log Records (CLRs)**: CLRs are written and flushed before compensating page writes; subsequent recovery runs follow `undo_next_lsn` to avoid duplicate compensation.
+5. **Process Crash Resiliency**: Genuine subprocess termination via `FaultInjector` confirms recovery restarts cleanly and completes from persistent `.wal` and `.db` files.
+6. **Buffer Pool Pin Safety**: All frames in the buffer pool are released (`pin_count == 0`) and clean (`is_dirty == False`) upon recovery completion.

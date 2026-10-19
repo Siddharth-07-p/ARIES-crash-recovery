@@ -193,3 +193,47 @@ Recovery execution adheres strictly to canonical ARIES stage sequencing:
 - Uses existing persistent `.wal` and `.db` files without truncation or overwrite.
 - Re-running recovery on an already-recovered database is idempotent (0 losers, 0 CLRs, 0 page writes).
 - Crashes during Redo or Undo are safely resumable on restart using durable CLRs and `undo_next_lsn`.
+
+---
+
+# Phase 11: ARIES Integration and Correctness Testing — Implementation Plan
+
+## 1. Objective & Scope
+
+Perform comprehensive integration and correctness validation across all ARIES components (Storage, Buffer, WAL, Checkpointing, Analysis, Redo, Undo, and RecoveryManager).
+- Validate all 20 required integration scenarios against the unified RecoveryManager.
+- Verify core ARIES invariants including durability, redo repeatability, undo backward-chaining, buffer pool pin safety, and idempotence.
+- Maintain full compatibility with all existing Phase 0–10 APIs and test suites.
+
+## 2. Integration Test Matrix (20 Scenarios)
+
+Implemented in [`backend/tests/test_integration_matrix.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_integration_matrix.py):
+1. Clean database with no recovery work required.
+2. Committed transaction whose updates must survive restart.
+3. Incomplete transaction whose updates must be undone.
+4. Multiple interleaved transactions with different commit/abort outcomes.
+5. Multiple updates by the same transaction to the same page.
+6. Multiple transactions updating different pages.
+7. A transaction updating multiple pages before a crash.
+8. Recovery with a valid checkpoint present.
+9. Recovery when the checkpoint is absent or incomplete.
+10. A crash during Redo followed by another recovery attempt.
+11. A crash during Undo followed by another recovery attempt.
+12. A crash after a CLR is flushed but before the corresponding page update is flushed.
+13. A crash after Undo has completed but before recovery completion is recorded.
+14. Repeated recovery on an already recovered database (idempotence).
+15. Corrupted or invalid WAL records and invalid LSN chains.
+16. Invalid transaction or page references.
+17. Recovery failures at each orchestration stage.
+18. File-based recovery using the same database and WAL files across process restarts.
+19. Buffer-pool pin/unpin safety and page consistency after recovery.
+20. Compatibility with all existing public APIs and tests.
+
+## 3. Verified Correctness Invariants
+
+- Committed transactions are never undone during recovery.
+- Incomplete transactions are completely rolled back to before-images.
+- Redo repeats history idempotently and respects pageLSN ordering.
+- Undo strictly follows transaction backward chains and logs CLRs prior to page writes.
+- Real subprocess crashes at fault points resume safely on restart.
+- Buffer pool pins are guaranteed 0 after recovery (no frame leaks).
