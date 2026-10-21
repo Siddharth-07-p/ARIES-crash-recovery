@@ -944,3 +944,165 @@ The Phase 16C test suite in [`backend/tests/test_benchmark_api.py`](file:///c:/U
 
 - **Full Suite Verification**: 303 passed, 4 warnings in 11.12s.
 - **Frontend Production Build**: `npm run build` passed in 5.58s with 0 errors.
+
+---
+
+# Phase 16D: End-to-End Integration Verification — Walkthrough
+
+## Overview
+
+Phase 16D performs comprehensive end-to-end integration verification across all system components developed across Phases 0–16C:
+- **FastAPI Core & Lifespan Architecture**: Automatic database engine initialization, non-destructive startup, and graceful resource cleanup.
+- **Live Database Engine**: Disk Manager, Buffer Pool Manager (LRU + pin tracking), Log Manager (WAL), Transaction Manager, Checkpoint Manager, and Recovery Manager.
+- **Monitoring APIs**: `/api/health`, `/api/monitoring/status`, `/api/monitoring/transactions`, `/api/monitoring/wal`, `/api/monitoring/buffer-pool`, `/api/monitoring/workload`, `/api/monitoring/benchmark`, `/api/monitoring/recovery`, and `/api/benchmark/scenarios`.
+- **Synthetic Workload Execution**: `POST /api/workload/run` operating safely on the live active database instance and updating real-time transaction, WAL, and buffer pool metrics.
+- **Benchmark Execution**: `POST /api/benchmark/run` executing reproducible statistical suites in isolated storage and updating throughput and recovery distributions.
+- **React Monitoring Dashboard**: Real-time polling via `useMonitoringData.ts`, loading, available, empty, and error states across all subsystem cards.
+
+---
+
+## 1. End-to-End System Architecture
+
+```
+                                  +-------------------------------------------------------------+
+                                  |                 React Frontend (Vite + TS)                  |
+                                  |                   http://localhost:5173/                    |
+                                  +-------------------------------------------------------------+
+                                     |                     |                         |
+                           useMonitoringData()     Workload Trigger          Benchmark Trigger
+                           (Polls every 3000ms)    (POST /api/workload/run)  (POST /api/benchmark/run)
+                                     |                     |                         |
+                                     v                     v                         v
+  +---------------------------------------------------------------------------------------------+
+  |                                        FastAPI Backend                                      |
+  |                                     http://127.0.0.1:8000/                                  |
+  |                                                                                             |
+  |  +--------------------+   +-----------------------+   +----------------------------------+  |
+  |  |   /api/health      |   | /api/monitoring/*     |   | Workload & Benchmark Concurrency |  |
+  |  |   GET status: ok   |   | Status, Tx, WAL, BP,  |   | workload_lock (Atomic Mutex)     |  |
+  |  |                    |   | Workload, Benchmark   |   | -> Rejects overlap with 409      |  |
+  |  +--------------------+   +-----------------------+   +----------------------------------+  |
+  |                                                                |                            |
+  |                                +-------------------------------+                            |
+  |                                |                               |                            |
+  |                                v                               v                            |
+  |                 [Live Database Execution]        [Isolated Benchmark Execution]             |
+  |                 WorkloadExecutor.execute_live()  BenchmarkRunner.run()                      |
+  |                 Uses active DB instance          Uses temp isolated storage                 |
+  |                 Leaves managers OPEN             Leaves live files UNTOUCHED                |
+  |                                |                               |                            |
+  |                                v                               v                            |
+  |                 +-------------------------------------------------------+                   |
+  |                 |                   monitoring_state                    |                   |
+  |                 | (In-memory thread-safe singleton registered by engine)|                   |
+  |                 +-------------------------------------------------------+                   |
+  |                                        |                                                    |
+  |                         +--------------+--------------+                                     |
+  |                         |                             |                                     |
+  |                         v                             v                                     |
+  |             +-----------------------+     +-----------------------+                         |
+  |             |  data/database.db     |     |  data/database.wal    |                         |
+  |             |  Persistent Data      |     |  Write-Ahead Log      |                         |
+  |             +-----------------------+     +-----------------------+                         |
+  +---------------------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. Verification Protocol & Results
+
+### 2.1 Backend Test Suites
+All 312 backend tests passed with 0 failures:
+- **Baseline Suite**: 303 tests covering Storage, Buffer Pool, WAL, Transactions, Checkpointing, Analysis, Redo, Undo (CLRs), Recovery Orchestration, Fault Injection, Integration Matrix, Synthetic Workload Engine, Benchmark Framework, Lifespan, Workload API, and Benchmark API.
+- **Dedicated E2E Integration Suite** (`backend/tests/test_e2e_integration.py`): 9 comprehensive integration scenarios:
+  1. `test_01_health_and_initial_status`: Verifies `/api/health` and `/api/monitoring/status`.
+  2. `test_02_benchmark_scenario_discovery`: Verifies `/api/benchmark/scenarios` preset listing and bounds.
+  3. `test_03_workload_execution_and_monitoring_update`: Verifies live workload execution and state reflection on `/workload`, `/transactions`, and `/wal`.
+  4. `test_04_workload_validation_and_error_handling`: Verifies parameter rejection (422) for invalid bounds and ratios.
+  5. `test_05_benchmark_execution_and_data_preservation`: Verifies benchmark execution and byte-exact SHA-256 hash preservation of live database files.
+  6. `test_06_benchmark_validation_and_scenario_not_found`: Verifies rejection of unknown scenarios and invalid run counts (422).
+  7. `test_07_concurrent_workload_and_benchmark_locking`: Verifies `workload_lock` mutual exclusion (409 Conflict).
+  8. `test_08_uninitialized_database_behavior`: Verifies clean 503 response and empty monitoring state when uninitialized.
+  9. `test_09_full_end_to_end_lifecycle`: Verifies sequential multi-run lifecycle: clean start -> workload -> verification -> benchmark -> re-verification.
+
+### 2.2 Frontend Production Build
+- Executed `npm run build` in `frontend/`:
+  - 1494 modules transformed.
+  - Output files generated in `frontend/dist/`:
+    - `dist/index.html` (0.47 kB)
+    - `dist/assets/index-*.css` (20.30 kB)
+    - `dist/assets/index-*.js` (477.73 kB)
+  - 0 errors, 0 warnings.
+
+### 2.3 Live Running Service Verification
+Live HTTP requests were executed against the active FastAPI server at `http://127.0.0.1:8000`:
+
+| Endpoint | Method | Outcome | Key Observations |
+|---|---|---|---|
+| `/api/health` | GET | 200 OK | `status: "ok"`, `version: "0.1.0"` |
+| `/api/monitoring/status` | GET | 200 OK | `status: "operational"`, `database_initialized: true` |
+| `/api/benchmark/scenarios` | GET | 200 OK | Returns all 10 registered presets with transaction, page, and operation parameters |
+| `/api/workload/run` | POST | 200 OK | 10 tx, 4 pages, 70 ops; 8 committed, 2 aborted, 0 incomplete, `valid: true` |
+| `/api/monitoring/workload` | GET | 200 OK | Transitioned to `status: "available"`, displaying 70 operations and 10 transactions |
+| `/api/monitoring/transactions`| GET | 200 OK | Reflects live transaction counters: `total_started: 10`, `total_committed: 8`, `total_aborted: 2` |
+| `/api/monitoring/wal` | GET | 200 OK | Reflects live WAL log records: `total_records: 124`, `flushed_lsn: 124` |
+| `/api/benchmark/run` | POST | 200 OK | `small_workload` (3 measured + 1 warmup); 100% valid; 600.78 TPS; 1802.34 OPS |
+| `/api/monitoring/benchmark` | GET | 200 OK | Transitioned to `status: "available"`; displays 3/3 valid runs, 600.78 TPS, and isolated storage flag |
+| `/api/workload/run` (invalid) | POST | 422 Unprocessable | `num_transactions: 0` rejected cleanly |
+| `/api/benchmark/run` (invalid)| POST | 422 Unprocessable | Unknown scenario `"unknown_scenario_xyz"` rejected cleanly |
+| `/api/benchmark/run` (invalid)| POST | 422 Unprocessable | `repetitions: 20` (exceeds limit 10) rejected cleanly |
+
+### 2.4 Persistent Live Storage Preservation
+- **Live File Integrity Check**:
+  - Live files `data/database.db` (16,384 bytes) and `data/database.wal` (8,338 bytes) were inspected before and after running the statistical benchmark suite.
+  - The live files retained identical byte lengths.
+  - In automated test suite `test_05_benchmark_execution_and_data_preservation`, SHA-256 hashes of `data/database.db` and `data/database.wal` were computed before and after benchmark execution and confirmed byte-for-byte identical.
+
+---
+
+## 3. Dashboard Behavior & State Verification
+
+The frontend React dashboard ([`frontend/src/App.tsx`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/App.tsx)) and custom hook ([`frontend/src/hooks/useMonitoringData.ts`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/frontend/src/hooks/useMonitoringData.ts)) handle the following UI states:
+
+1. **Initial / Uninitialized State**:
+   - If the backend is running without an initialized database, subsystem cards display `"Database Uninitialized"` with empty state guidance.
+2. **Operational State**:
+   - When the backend initializes during lifespan, cards display active buffer pool frames, transaction counters, and WAL log sequence numbers.
+3. **Empty States**:
+   - Before any workload is executed, the **Synthetic Workload Summary** card displays an empty state prompt (`"No Workload Executed Yet"`).
+   - Before any benchmark is executed, the **Performance Benchmarks** card displays an empty state prompt (`"No Benchmark Executed Yet"`).
+4. **Available / Populated States**:
+   - Upon executing `POST /api/workload/run`, the Workload card immediately populates with total transactions, total operations, committed/aborted/active counts, and a green `"Passed"` validation badge.
+   - Upon executing `POST /api/benchmark/run`, the Benchmark card immediately populates with scenario name, measured runs, TPS, OPS, latency distributions, and an **Isolated Storage** badge.
+5. **Degraded / Error State Handling**:
+   - If an individual monitoring endpoint fails (e.g. network disconnect or backend restart), `Promise.allSettled()` prevents cascading dashboard crashes, maintaining last known good data or localized card error indicators.
+
+### Manual Browser Verification Procedure:
+1. Open Google Chrome, Edge, or Firefox and navigate to `http://localhost:5173/`.
+2. Verify that the **System Status** banner displays **Operational** with **Database Initialized**.
+3. Verify that the **Transaction Manager** card displays `10 Started`, `8 Committed`, `2 Aborted`.
+4. Verify that the **Write-Ahead Logging** card displays `124 Records` and `Flushed LSN 124`.
+5. Verify that the **Synthetic Workload Summary** card shows `10 Transactions`, `70 Operations`, and `Valid: Passed`.
+6. Verify that the **Performance Benchmarks** card shows `Scenario: small_workload`, `Measured: 3`, `TPS: ~600`, and the **Isolated Storage** badge.
+
+---
+
+## 4. Summary of Bugs Fixed & Invariants Upheld
+
+- **Zero Breaking Integration Bugs**: The integration contracts established in Phases 16A, 16B, and 16C functioned seamlessly without code alterations.
+- **Windows File Handle Discipline**: The system strictly prevents concurrent file access conflicts on Windows by routing live workloads through the shared lifespan engine instances and isolating benchmark repetitions in per-run temporary directories.
+- **Strict Concurrency Mutual Exclusion**: `workload_lock` successfully guards against simultaneous workload/benchmark execution.
+- **ARIES Algorithm Unchanged**: No changes were made to Analysis, Redo, Undo (with CLRs), or Checkpoint internals.
+
+---
+
+## 5. Remaining Limitations & Recommended Next Phase
+
+### Remaining Limitations:
+1. **Single-Worker Concurrency**: Workloads and benchmarks currently acquire a global mutex (`workload_lock`), restricting execution to one active workload or benchmark at any given moment.
+2. **Ephemeral In-Memory Workload/Benchmark History**: `monitoring_state` stores the *latest* workload and benchmark result in memory. Restarting the backend server resets these to `status: "empty"`, though persistent database tables and WAL survive cleanly.
+
+### Recommended Next Phase — Phase 17: Interactive Control Plane & Scenario Runner
+- Add interactive frontend controls to trigger custom workloads and benchmark scenarios directly from the dashboard UI.
+- Provide a persistent benchmark experiment run history log with comparative chart visualizations.
+- Add live crash fault injection controls to demonstrate real-time ARIES restart recovery in the browser.

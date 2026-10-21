@@ -160,13 +160,15 @@
 }
 
 .badge-available,
-.badge-open {
+.badge-open,
+.badge-checking {
   color: #38bdf8;
   background: rgba(56, 189, 248, 0.12);
   border-color: rgba(56, 189, 248, 0.3);
 }
 .badge-available .badge-dot,
-.badge-open .badge-dot {
+.badge-open .badge-dot,
+.badge-checking .badge-dot {
   background: var(--accent-cyan);
   box-shadow: 0 0 8px var(--accent-cyan);
 }

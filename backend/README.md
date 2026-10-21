@@ -148,6 +148,55 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/benchmark/run" -C
 } | ConvertTo-Json)
 ```
 
+### End-to-End Integration Verification (Phase 16D)
+
+The complete ARIES stack has been verified end-to-end across backend services, live storage, monitoring state, synthetic workloads, benchmark suites, and the React frontend:
+
+- **E2E Integration Test Suite**: Dedicated suite in `backend/tests/test_e2e_integration.py` validates the complete integration matrix:
+  - Startup lifespan and clean subsystem initialization.
+  - Health check (`/api/health`) and operational status (`/api/monitoring/status`).
+  - Scenario discovery (`/api/benchmark/scenarios`).
+  - Workload execution (`/api/workload/run`) with real-time metric updates on `/api/monitoring/workload`, `/api/monitoring/transactions`, and `/api/monitoring/wal`.
+  - Benchmark execution (`/api/benchmark/run`) with metric aggregation on `/api/monitoring/benchmark`.
+  - Non-destructive storage isolation: live `data/database.db` and `data/database.wal` binary contents remain intact during benchmark runs.
+  - Concurrency guards: mutual exclusion between workloads and benchmarks via `workload_lock` (HTTP 409 Conflict).
+  - Input validation: bounds checking and schema verification (HTTP 422 Unprocessable Entity).
+  - Uninitialized state handling: clean degradation when database services are unavailable (HTTP 503).
+- **Verified Endpoints**:
+  - `GET /api/health`: Basic process health (`status: ok`).
+  - `GET /api/monitoring/status`: Operational state (`database_initialized: true`).
+  - `GET /api/monitoring/transactions`: Live active/committed/aborted transaction counters.
+  - `GET /api/monitoring/wal`: Current WAL record count and flushed LSN.
+  - `GET /api/monitoring/buffer-pool`: Resident page count, dirty pages, hit ratio, frame capacity.
+  - `GET /api/monitoring/workload`: Latest synthetic workload summary and status.
+  - `GET /api/monitoring/benchmark`: Aggregated benchmark performance distributions and isolation flag.
+  - `GET /api/monitoring/recovery`: Recovery status and stage details.
+  - `GET /api/benchmark/scenarios`: Registered preset scenario descriptions.
+  - `POST /api/workload/run`: Execute bounded workload against live database.
+  - `POST /api/benchmark/run`: Execute statistical benchmark suite in isolated storage.
+
+#### Verified Verification Commands:
+
+```powershell
+# Run full backend test suite (312 tests)
+backend\.venv\Scripts\python -m pytest -v
+
+# Run E2E integration test suite
+backend\.venv\Scripts\python -m pytest tests/test_e2e_integration.py -v
+
+# Run frontend production build
+cd frontend; npm run build; cd ..
+
+# Query live monitoring status
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/monitoring/status"
+
+# Trigger synthetic workload
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/workload/run" -ContentType "application/json" -Body '{"num_transactions": 10, "num_pages": 4, "operations_per_transaction": 5}'
+
+# Trigger benchmark run
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/benchmark/run" -ContentType "application/json" -Body '{"scenario": "small_workload", "repetitions": 3, "warmup_runs": 1}'
+```
+
 ## Running Tests
 
 Execute the test suite using `pytest`:

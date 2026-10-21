@@ -18,7 +18,12 @@ interface WorkloadSectionProps {
 
 export const WorkloadSection: React.FC<WorkloadSectionProps> = ({ workload }) => {
   const { data, loading, error } = workload;
-  const isAvailable = data?.status === 'available';
+  const isAvailable = Boolean(
+    data && (
+      data.status?.toLowerCase() === 'available' ||
+      (data.executed_operations !== null && data.executed_operations !== undefined && data.executed_operations > 0)
+    )
+  );
 
   return (
     <section className="dashboard-section" aria-labelledby="workload-section-title">
@@ -29,14 +34,32 @@ export const WorkloadSection: React.FC<WorkloadSectionProps> = ({ workload }) =>
             Synthetic Workload Summary
           </h3>
           <StatusBadge
-            status={isAvailable ? 'available' : 'not_available'}
-            label={isAvailable ? 'Latest Run Available' : 'No Workload Run'}
+            status={loading && !data ? 'checking' : isAvailable ? 'available' : 'not_available'}
+            label={
+              loading && !data
+                ? 'Loading...'
+                : isAvailable
+                ? 'Latest Run Available'
+                : 'No Workload Run'
+            }
           />
         </div>
         {error && <span className="section-error-pill">Error: {error}</span>}
       </div>
 
-      {!isAvailable ? (
+      {loading && !data ? (
+        <div className="empty-state-panel">
+          <div className="empty-state-icon">
+            <Activity size={28} className="text-cyan spin" />
+          </div>
+          <div className="empty-state-text">
+            <h4>Loading Synthetic Workload...</h4>
+            <p>
+              Retrieving latest synthetic transaction workload telemetry from database server...
+            </p>
+          </div>
+        </div>
+      ) : !isAvailable ? (
         <div className="empty-state-panel">
           <div className="empty-state-icon">
             <Play size={28} className="text-muted" />

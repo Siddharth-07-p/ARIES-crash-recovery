@@ -100,8 +100,8 @@ export function useMonitoringData(pollIntervalMs: number = 10000) {
         fetchEndpoint<BenchmarkSummaryResponse>('/api/monitoring/benchmark', signal),
       ]);
 
-      // If unmounted, or this fetch was superseded by a newer one, or signal was aborted: ignore
-      if (!isMountedRef.current || fetchId !== activeFetchIdRef.current || signal.aborted) {
+      // If unmounted or this fetch was superseded by a newer one: ignore
+      if (!isMountedRef.current || fetchId !== activeFetchIdRef.current) {
         return;
       }
 
@@ -117,10 +117,16 @@ export function useMonitoringData(pollIntervalMs: number = 10000) {
             lastUpdated: now,
           };
         } else {
+          const isAbort =
+            res.reason instanceof Error && res.reason.name === 'AbortError';
           return {
             data: prev.data,
             loading: false,
-            error: res.reason instanceof Error ? res.reason.message : 'Request failed',
+            error: isAbort
+              ? null
+              : res.reason instanceof Error
+              ? res.reason.message
+              : 'Request failed',
             lastUpdated: prev.lastUpdated,
           };
         }

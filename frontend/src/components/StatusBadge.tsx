@@ -41,8 +41,10 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
       ? 'failed'
       : normalized === 'not_run' || normalized === 'not_available'
       ? 'not_run'
-      : normalized === 'open'
+      : normalized === 'available' || normalized === 'open'
       ? 'available'
+      : normalized === 'checking'
+      ? 'checking'
       : normalized === 'closed'
       ? 'degraded'
       : 'uninitialized');
