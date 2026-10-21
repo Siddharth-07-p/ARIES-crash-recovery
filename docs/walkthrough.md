@@ -827,3 +827,120 @@ The Phase 16B test suite in [`backend/tests/test_workload_api.py`](file:///c:/Us
 
 - **Full Suite Verification**: 291 passed, 3 warnings in 22.12s.
 - **Frontend Production Build**: `npm run build` passed in 7.34s with 0 errors.
+
+---
+
+# Phase 16C: Benchmark-to-Monitoring Integration — Walkthrough
+
+## Overview
+
+Phase 16C integrates the existing ARIES performance benchmarking framework with the running FastAPI application, exposing a bounded, explicitly invoked benchmark endpoint (`POST /api/benchmark/run`) and registering aggregated performance metrics with `monitoring_state` so the live monitoring dashboard immediately displays real throughput and recovery timing distributions.
+
+---
+
+## 1. Architecture and Storage Safety
+
+```
+  +-------------------------------------------------------------------------------+
+  |                                FastAPI Server                                 |
+  |                                                                               |
+  |  POST /api/benchmark/run                                                      |
+  |             |                                                                 |
+  |             v                                                                 |
+  |     +----------------+     Workload or Benchmark active?                      |
+  |     | Concurrency    |----------------------------------> HTTP 409 Conflict   |
+  |     | Guard (Lock)   |                                                        |
+  |     +----------------+                                                        |
+  |             | Not locked (Acquired)                                           |
+  |             v                                                                 |
+  |     +----------------+     Live DB Subsystems closed?                         |
+  |     | State Check    |----------------------------------> HTTP 503 Service   |
+  |     +----------------+                                    Unavailable         |
+  |             | Operational                                                     |
+  |             v                                                                 |
+  |     +----------------------------------------------------------+              |
+  |     | BenchmarkRunner.run()                                    |              |
+  |     |                                                          |              |
+  |     |  * Validates scenario preset (from 10 registered)        |              |
+  |     |  * Enforces repetitions <= 10, warmup <= 5, total <= 12  |              |
+  |     |  * Executes each repetition in isolated temporary storage|              |
+  |     |  * NEVER mutates, truncates, or touches live database    |              |
+  |     |    (database.db & database.wal preserved completely)     |              |
+  |     |  * Computes statistical aggregates (mean, p95, std_dev)  |              |
+  |     +----------------------------------------------------------+              |
+  |             |                                                                 |
+  |             +------------ Any Run Failed Validation?                          |
+  |             |                      |                                          |
+  |             |                      v                                          |
+  |             |            HTTP 422 (Not Registered in Monitoring State)        |
+  |             v                                                                 |
+  |     +------------------------------------------+                              |
+  |     | monitoring_state.register_benchmark(...) |                              |
+  |     +------------------------------------------+                              |
+  |             |                                                                 |
+  |             v                                                                 |
+  |     HTTP 200 OK (BenchmarkRunResponse)                                        |
+  |       - execution_mode: "isolated_temporary_storage"                          |
+  |       - isolation_note: "..."                                                 |
+  |             |                                                                 |
+  |             v                                                                 |
+  |     Dashboard fetches /api/monitoring/benchmark                               |
+  |     Displays "Performance Benchmarks" with "Isolated Storage" badge           |
+  +-------------------------------------------------------------------------------+
+```
+
+### Key Technical Decisions:
+1. **Isolated Storage per Repetition**: Benchmarks necessarily require multiple runs (warmup + measured repetitions) to generate meaningful statistical distributions (mean, median, min, max, std dev, p95) from a clean baseline. Executing repeated runs on the live database would destroy baseline repeatability and corrupt active application data. Using isolated temporary storage per run preserves live files (`data/database.db` and `data/database.wal`) with byte-exact precision.
+2. **Transparent Measurement Scope**: The API response explicitly declares `execution_mode: "isolated_temporary_storage"` with an accompanying `isolation_note`. The frontend displays an **Isolated Storage** badge in the benchmark banner to eliminate any ambiguity.
+3. **Mutual Exclusion Concurrency Guard**: Benchmark execution shares `workload_lock` with the Phase 16B synthetic workload endpoint. Any attempt to run a benchmark while a workload is running (or vice versa, or concurrent benchmarks) is rejected with `HTTP 409 Conflict`.
+4. **Failure Containment**: If any measured run fails correctness validation, `HTTP 422 Unprocessable Entity` is returned and the result is strictly blocked from registering with `monitoring_state`.
+5. **No Stack Trace Exposure**: Execution exceptions are logged with full server-side tracebacks and returned to the client as sanitized `HTTP 500` error details.
+
+---
+
+## 2. API Contract & Validation Limits
+
+- **Endpoints**: `POST /api/benchmark/run` and `POST /api/benchmark/execute`
+- **Discovery**: `GET /api/benchmark/scenarios`
+- **Supported Scenarios**:
+  - `small_workload` (default): 5 tx, 2 pages, 3 ops/tx.
+  - `medium_workload`: 20 tx, 8 pages, 5 ops/tx.
+  - `large_workload`: 50 tx, 16 pages, 8 ops/tx.
+  - `read_heavy`: 85% reads, 15% updates.
+  - `update_heavy`: 10% reads, 90% updates.
+  - `hotspot_contention`: 80% Page 0 contention.
+  - `interleaved_concurrent`: 100% interleaved scheduling.
+  - `high_abort`: 70% aborts.
+  - `recovery_only`: Prepares uncheckpointed crash state and measures ARIES recovery stages.
+  - `crash_recovery_commit_fault`: Subprocess crash experiment with restart recovery.
+- **Request Limits**:
+  - `scenario`: Must be one of the registered presets.
+  - `repetitions`: `1` to `10` (default: `3`).
+  - `warmup_runs`: `0` to `5` (default: `1`).
+  - `repetitions + warmup_runs` <= `12`.
+  - `timeout_per_run`: `1.0` to `60.0` seconds (default: `30.0`).
+- **Response**: `BenchmarkRunResponse` containing execution counts, throughput, duration distributions, and isolation metadata.
+
+---
+
+## 3. Test Suite Verification
+
+The Phase 16C test suite in [`backend/tests/test_benchmark_api.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_benchmark_api.py) validates all 12 core scenarios:
+
+| Test Name | Scenario Verified | Status |
+|---|---|---|
+| `test_01_successful_benchmark_execution` | Bounded benchmark executes, computes aggregates, leaves managers open | PASSED |
+| `test_02_benchmark_result_registered_and_retrievable_via_monitoring` | Outcome registered with monitoring_state, retrievable on /benchmark | PASSED |
+| `test_03_benchmark_scenarios_discovery_endpoint` | GET /api/benchmark/scenarios lists all presets and operational bounds | PASSED |
+| `test_04_benchmark_execute_alias_endpoint` | POST /api/benchmark/execute acts as drop-in alias for /run | PASSED |
+| `test_05_invalid_parameters_bounds_rejected` | Out-of-bounds scenarios, repetitions, warmup runs, and timeouts return 422 | PASSED |
+| `test_06_uninitialized_database_returns_503` | Calling endpoint when database is uninitialized or closed returns 503 | PASSED |
+| `test_07_concurrent_benchmark_execution_rejected_with_409` | Concurrent benchmark execution requests rejected with 409 Conflict | PASSED |
+| `test_08_mutual_exclusion_with_workload_execution` | Workload and benchmark endpoints are mutually exclusive across runs | PASSED |
+| `test_09_storage_safety_preserves_live_database_files` | Benchmarks in isolated storage never overwrite, truncate, or pollute live DB/WAL | PASSED |
+| `test_10_benchmark_validation_failure_handling` | Validation failures return 422 and prevent false success in monitoring state | PASSED |
+| `test_11_internal_execution_failure_handling` | Execution errors return 500 without stack traces and preserve manager health | PASSED |
+| `test_12_recovery_scenario_benchmark_metrics` | recovery_only scenario executes and captures mean_recovery_duration_s | PASSED |
+
+- **Full Suite Verification**: 303 passed, 4 warnings in 11.12s.
+- **Frontend Production Build**: `npm run build` passed in 5.58s with 0 errors.

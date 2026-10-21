@@ -45,8 +45,8 @@ export const BenchmarkSection: React.FC<BenchmarkSectionProps> = ({ benchmark })
             <h4>No Benchmark Results Available</h4>
             <p>
               No performance benchmark scenario has been executed in the current process lifecycle.
-              Run benchmarks via <code>python -m app.benchmark</code> to populate throughput and
-              recovery timing distributions.
+              Trigger benchmarks via <code>POST /api/benchmark/run</code> or <code>python -m app.benchmark</code> to
+              populate throughput and recovery timing distributions.
             </p>
           </div>
         </div>
@@ -56,8 +56,17 @@ export const BenchmarkSection: React.FC<BenchmarkSectionProps> = ({ benchmark })
             <div>
               <span className="scenario-label">Scenario Name</span>
               <h4 className="scenario-title">{data?.scenario_name || 'Custom Benchmark'}</h4>
+              <p className="scenario-subtitle">
+                Measured in isolated per-run storage to preserve live database state
+              </p>
             </div>
             <div className="scenario-status">
+              <span
+                className="badge-pill pill-indigo"
+                title="Benchmarks run in isolated temporary storage to ensure baseline reproducibility and data safety"
+              >
+                <span>Isolated Storage</span>
+              </span>
               {data?.is_success ? (
                 <span className="badge-pill pill-emerald">
                   <CheckCircle2 size={16} />

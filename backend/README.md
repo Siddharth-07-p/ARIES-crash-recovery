@@ -105,6 +105,49 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/workload/run" -Co
 } | ConvertTo-Json)
 ```
 
+### Performance Benchmark Execution (Phase 16C)
+
+An explicit, bounded endpoint allows triggering standard benchmark scenarios and recording metrics to the monitoring dashboard:
+
+- **Endpoints**: `POST /api/benchmark/run` (alias: `POST /api/benchmark/execute`)
+- **Discovery Endpoint**: `GET /api/benchmark/scenarios` (lists all 10 registered preset scenarios)
+- **Supported Presets**:
+  - `small_workload` (default): Fast sanity scenario (5 tx, 2 pages, 3 ops/tx).
+  - `medium_workload`: Balanced workload (20 tx, 8 pages, 5 ops/tx).
+  - `large_workload`: Heavier load (50 tx, 16 pages, 8 ops/tx).
+  - `read_heavy`: 85% reads, 15% updates (20 tx, 8 pages, 6 ops/tx).
+  - `update_heavy`: 10% reads, 90% updates (20 tx, 8 pages, 6 ops/tx).
+  - `hotspot_contention`: 80% Page 0 contention (20 tx, 8 pages, 5 ops/tx).
+  - `interleaved_concurrent`: 100% interleaved scheduling (15 tx, 4 pages, 4 ops/tx).
+  - `high_abort`: 70% aborts measuring rollback/CLR overhead (20 tx, 4 pages, 5 ops/tx).
+  - `recovery_only`: Prepares uncheckpointed crash state and measures ARIES recovery stages.
+  - `crash_recovery_commit_fault`: Subprocess crash experiment with restart recovery.
+- **Request Parameters & Bounds**:
+  - `scenario`: Preset name (default: `"small_workload"`). Must be registered in `list_preset_scenarios()`.
+  - `repetitions`: `1` to `10` measured repetitions (default: `3`).
+  - `warmup_runs`: `0` to `5` unmeasured warmup runs (default: `1`).
+  - `total_runs`: `repetitions + warmup_runs <= 12`.
+  - `seed`: Optional deterministic integer random seed (default: `42`).
+  - `timeout_per_run`: `1.0` to `60.0` seconds per run (default: `30.0`).
+- **Storage Safety & Baseline Isolation**:
+  - Benchmark repetitions execute in isolated temporary databases per-run. This guarantees reproducible baselines across warmup and measured iterations and completely prevents multi-run benchmark traffic from deleting, truncating, or corrupting live database files (`data/database.db` and `data/database.wal`).
+  - Responses explicitly include `execution_mode: "isolated_temporary_storage"` and `isolation_note`.
+- **Mutual Exclusion & Concurrency Protection**:
+  - Benchmark and workload executions share an atomic concurrency lock (`workload_lock`).
+  - Concurrent benchmark runs, concurrent workload runs, or interleaved benchmark/workload calls are immediately rejected with `409 Conflict`.
+- **Dashboard Observation**:
+  - Successful results are registered with `monitoring_state` and update the **Performance Benchmarks** card on the React dashboard (`/api/monitoring/benchmark`), displaying TPS, OPS, mean duration, and recovery duration with an **Isolated Storage** indicator badge.
+
+#### Example Usage (PowerShell):
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/benchmark/run" -ContentType "application/json" -Body (@{
+    scenario = "small_workload"
+    repetitions = 3
+    warmup_runs = 1
+    seed = 42
+} | ConvertTo-Json)
+```
+
 ## Running Tests
 
 Execute the test suite using `pytest`:
