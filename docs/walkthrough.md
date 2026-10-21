@@ -624,3 +624,103 @@ Executed in project root:
 .venv\Scripts\pytest -v
 ```
 - **Result**: 276 passed in 19.49s. Zero regressions across storage, WAL, transactions, buffer pool, checkpoints, analysis, redo, undo, recovery manager, integration matrix, workload generator, benchmarking, and monitoring APIs.
+
+---
+
+# Phase 16A: Live Database Initialization and Monitoring — Walkthrough
+
+## Overview
+
+Phase 16A integrates the persistent database engine into the live FastAPI web application using ASGI `lifespan`. This enables the React monitoring dashboard to observe real, active database subsystems (Disk, Buffer Pool, WAL, Transactions, Recovery) upon server startup without breaking read-only API contracts or fabricating metrics.
+
+---
+
+## 1. Architecture and Lifespan Lifecycle
+
+The database engine lifecycle is implemented in [`backend/app/main.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/app/main.py):
+
+```
+                       Uvicorn ASGI Startup
+                                |
+                                v
+               +---------------------------------+
+               |       Resolve Storage Paths     |
+               |  (data/database.db, .wal)       |
+               +---------------------------------+
+                                |
+                                v
+               +---------------------------------+
+               |      Initialize Subsystems      |
+               | - DiskManager (binary I/O)      |
+               | - LogManager (WAL log & LSNs)   |
+               | - BufferManager (pool_size=10)  |
+               | - TransactionManager            |
+               | - CheckpointManager             |
+               | - RecoveryManager               |
+               +---------------------------------+
+                                |
+                                v
+               +---------------------------------+
+               |   Existing WAL Records Check    |
+               +---------------------------------+
+                     /                     \
+       (Records > 0)                        (Records == 0)
+             |                                    |
+             v                                    v
+  +----------------------+               +------------------+
+  | ARIES Crash Recovery |               | Clean Baseline   |
+  | (Analysis, Redo,     |               | (recovery_status |
+  |  Undo with CLRs)     |               |  = "not_run")    |
+  +----------------------+               +------------------+
+             \                                    /
+              +-----------------+----------------+
+                                |
+                                v
+               +---------------------------------+
+               |   Register With Monitoring      |
+               | monitoring_state.register_db()  |
+               +---------------------------------+
+                                |
+                                v
+                    Live Requests Handled
+                                |
+                       ASGI Shutdown Signal
+                                |
+                                v
+               +---------------------------------+
+               |   Ordered Resource Teardown     |
+               | 1. cm.close()                   |
+               | 2. tm.close()                   |
+               | 3. bm.close() (flushes pages    |
+               |    and closes dm)               |
+               | 4. dm.close() (safety check)    |
+               | 5. lm.close() (flushes WAL)     |
+               | 6. monitoring_state.reset()     |
+               +---------------------------------+
+```
+
+---
+
+## 2. Invariants and Correctness Guarantees
+
+1. **Non-Destructive Persistence**: Existing database (`.db`) and WAL (`.wal`) binary files are never overwritten, reset, or truncated on startup.
+2. **Deterministic ARIES Recovery on Restart**: If uncheckpointed or active records exist in the WAL from a previous session or crash, `RecoveryManager.recover(raise_on_error=False)` runs before accepting incoming traffic. Redo repeats history and Undo generates CLRs to complete rollbacks.
+3. **No Metric Fabrication**: On a clean first start, `recovery_status` is accurately reported as `"not_run"`. If recovery fails, `status` becomes `"degraded"` and `recovery_status` becomes `"failed"` with the exact stage and error message preserved.
+4. **Leak-Proof Resource Cleanup**: A `try...finally` block ensures that even if startup fails midway, any file handles already opened are closed in reverse order without descriptor leaks.
+5. **Decoupled Monitoring Contract**: The monitoring endpoints remain strictly read-only HTTP `GET` queries.
+
+---
+
+## 3. Verification & Test Suite
+
+The dedicated Phase 16A test suite resides in [`backend/tests/test_lifespan.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_lifespan.py):
+
+| Test Name | Scenario Verified | Status |
+|---|---|---|
+| `test_01_lifespan_initializes_and_registers_database` | Clean startup initializes and registers all 5 subsystems; status is operational | PASSED |
+| `test_02_lifespan_shutdown_closes_resources_and_resets` | Shutdown closes all managers in order and resets monitoring state | PASSED |
+| `test_03_lifespan_recovers_existing_database_and_wal` | Startup recovers uncommitted loser transactions with CLRs and reports recovered | PASSED |
+| `test_04_lifespan_preserves_committed_data_across_restarts` | Committed data and WAL records survive repeated startup/shutdown cycles | PASSED |
+| `test_05_lifespan_handles_recovery_failure_gracefully` | Corrupted WAL causes clean startup failure without file descriptor leaks | PASSED |
+- **Full Suite Verification**: 281 tests passing (276 existing + 5 Phase 16A lifespan tests).
+- **Frontend Build**: `npm run build` completed with 0 errors (`dist/index.html`, `dist/assets/*`).
