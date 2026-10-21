@@ -19,6 +19,7 @@ from app.recovery.recovery_manager import RecoveryManager
 from app.storage.disk_manager import DiskManager
 from app.transaction.transaction_manager import TransactionManager
 from app.wal.log_manager import LogManager
+from app.workload.router import router as workload_router
 
 logger = logging.getLogger("aries.main")
 
@@ -178,6 +179,7 @@ app.add_middleware(
 )
 
 app.include_router(monitoring_router)
+app.include_router(workload_router)
 
 
 @app.get("/")
@@ -189,6 +191,7 @@ def root():
         "docs_url": "/docs",
         "health_url": "/api/health",
         "monitoring_url": "/api/monitoring/status",
+        "workload_run_url": "/api/workload/run",
     }
 
 

@@ -271,6 +271,241 @@ class WorkloadExecutor:
         )
 
     @classmethod
+    def execute_live(
+        cls,
+        config: WorkloadConfig,
+        transaction_manager: TransactionManager,
+        log_manager: LogManager,
+        buffer_manager: BufferManager,
+        checkpoint_manager: Optional[CheckpointManager] = None,
+        plan: Optional[WorkloadPlan] = None,
+        base_init: bool = True,
+    ) -> WorkloadResult:
+        """Execute a synthetic workload against an existing active database instance without closing managers.
+
+        Args:
+            config: WorkloadConfig specifying parameters and distributions.
+            transaction_manager: Active TransactionManager instance.
+            log_manager: Active LogManager instance.
+            buffer_manager: Active BufferManager instance.
+            checkpoint_manager: Optional active CheckpointManager instance.
+            plan: Optional pre-generated WorkloadPlan. If None, generated from config.
+            base_init: If True, newly allocated pages are initialized with baseline patterns.
+
+        Returns:
+            WorkloadResult containing execution metrics and validation status.
+
+        Raises:
+            WorkloadExecutionError: If any manager is closed or parameters are invalid.
+        """
+        if transaction_manager is None or transaction_manager.is_closed:
+            raise WorkloadExecutionError("transaction_manager must be provided and open.")
+        if log_manager is None or log_manager.is_closed:
+            raise WorkloadExecutionError("log_manager must be provided and open.")
+        if buffer_manager is None or buffer_manager.is_closed:
+            raise WorkloadExecutionError("buffer_manager must be provided and open.")
+
+        if plan is None:
+            plan = WorkloadGenerator.generate(config)
+
+        dm = buffer_manager.disk_manager
+        tm = transaction_manager
+        lm = log_manager
+        bm = buffer_manager
+        cm = checkpoint_manager
+
+        # 1. Allocate and initialize accessible pages up to config.num_pages
+        allocated_count = dm.get_page_count()
+        while allocated_count < config.num_pages:
+            new_p = bm.allocate_page()
+            page_id = new_p.page_id
+            if base_init:
+                init_pat = f"PAGE_{page_id:04d}_INIT_BASE_DATA__".encode("ascii")
+                full_init = (init_pat * (PAGE_SIZE // len(init_pat) + 1))[:PAGE_SIZE]
+                new_p.write(0, full_init)
+            bm.unpin_page(page_id, is_dirty=True)
+            allocated_count = dm.get_page_count()
+
+        bm.flush_all_pages()
+
+        # 2. Record pre-workload page state for expected committed model tracking
+        expected_committed_pages: Dict[int, bytearray] = {}
+        for p_idx in range(config.num_pages):
+            page = bm.fetch_page(p_idx)
+            try:
+                expected_committed_pages[p_idx] = bytearray(page.read(0, PAGE_SIZE))
+            finally:
+                bm.unpin_page(p_idx, is_dirty=False)
+
+        # 3. Execution tracking state
+        executed_operations = 0
+        reads_executed = 0
+        updates_executed = 0
+        tx_map: Dict[int, int] = {}
+        transactions_started: List[int] = []
+        transactions_committed: List[int] = []
+        transactions_aborted: List[int] = []
+        tx_updates: Dict[int, List[Dict[str, Any]]] = {}
+
+        # 4. Execute operation plan
+        for op in plan.operations:
+            if op.operation_type == OperationType.BEGIN:
+                tx = tm.begin_transaction()
+                actual_tx_id = tx.transaction_id
+                tx_map[op.transaction_id] = actual_tx_id
+                transactions_started.append(actual_tx_id)
+                executed_operations += 1
+
+            elif op.operation_type == OperationType.READ:
+                assert op.page_id is not None
+                assert op.offset is not None
+                assert op.length is not None
+                page = bm.fetch_page(op.page_id)
+                try:
+                    _ = page.read(op.offset, op.length)
+                finally:
+                    bm.unpin_page(op.page_id, is_dirty=False)
+                reads_executed += 1
+                executed_operations += 1
+
+            elif op.operation_type == OperationType.UPDATE:
+                assert op.page_id is not None
+                assert op.offset is not None
+                assert op.length is not None
+                assert op.data is not None
+                actual_tx_id = tx_map.get(op.transaction_id, op.transaction_id)
+                page = bm.fetch_page(op.page_id)
+                try:
+                    before_image = page.read(op.offset, op.length)
+                    after_image = op.data
+                    lsn = lm.append_update(
+                        actual_tx_id,
+                        op.page_id,
+                        op.offset,
+                        before_image,
+                        after_image,
+                    )
+                    page.write(op.offset, after_image)
+                    bm.set_page_lsn(op.page_id, lsn)
+                finally:
+                    bm.unpin_page(op.page_id, is_dirty=True)
+
+                tx_updates.setdefault(actual_tx_id, []).append(
+                    {
+                        "page_id": op.page_id,
+                        "offset": op.offset,
+                        "length": op.length,
+                        "before_image": before_image,
+                        "after_image": after_image,
+                        "lsn": lsn,
+                    }
+                )
+                updates_executed += 1
+                executed_operations += 1
+
+            elif op.operation_type == OperationType.COMMIT:
+                actual_tx_id = tx_map.get(op.transaction_id, op.transaction_id)
+                tm.commit_transaction(actual_tx_id)
+                lm.flush()
+                transactions_committed.append(actual_tx_id)
+                executed_operations += 1
+
+                # Apply committed modifications to expected model
+                for upd in tx_updates.get(actual_tx_id, []):
+                    pid = upd["page_id"]
+                    off = upd["offset"]
+                    aimg = upd["after_image"]
+                    expected_committed_pages[pid][off : off + len(aimg)] = aimg
+
+            elif op.operation_type == OperationType.ABORT:
+                actual_tx_id = tx_map.get(op.transaction_id, op.transaction_id)
+                # In ARIES, runtime rollback compensates updates in reverse LSN order
+                for upd in reversed(tx_updates.get(actual_tx_id, [])):
+                    pid = upd["page_id"]
+                    off = upd["offset"]
+                    bimg = upd["before_image"]
+                    rec = lm.get_log_record(upd["lsn"])
+                    undo_next = rec.prev_lsn if rec is not None else None
+                    clr_lsn = lm.append_clr(
+                        actual_tx_id,
+                        pid,
+                        off,
+                        undo_next_lsn=undo_next,
+                        compensation_image=bimg,
+                    )
+                    page = bm.fetch_page(pid)
+                    try:
+                        page.write(off, bimg)
+                        bm.set_page_lsn(pid, clr_lsn)
+                    finally:
+                        bm.unpin_page(pid, is_dirty=True)
+
+                tm.abort_transaction(actual_tx_id)
+                lm.flush()
+                transactions_aborted.append(actual_tx_id)
+                executed_operations += 1
+
+            # Checkpoint interval check
+            if cm is not None and config.checkpoint_interval is not None:
+                if executed_operations % config.checkpoint_interval == 0:
+                    cm.create_checkpoint()
+
+        # 5. Determine incomplete transactions
+        transactions_incomplete = [
+            tx_id
+            for tx_id in transactions_started
+            if tx_id not in transactions_committed and tx_id not in transactions_aborted
+        ]
+
+        # 6. Validate frame pin safety
+        validation_errors: List[str] = []
+        for pid in bm.get_resident_pages():
+            pins = bm.get_pin_count(pid)
+            if pins != 0:
+                validation_errors.append(f"Page {pid} leaked frame pin: pin_count={pins}")
+
+        # 7. Flush buffer pages to disk
+        bm.flush_all_pages()
+
+        # 8. On-disk state verification (when no incomplete transactions exist)
+        if not transactions_incomplete:
+            for pid, expected_bytes in expected_committed_pages.items():
+                if pid >= dm.get_page_count():
+                    validation_errors.append(f"Page {pid} not allocated on disk.")
+                    continue
+                disk_page = dm.read_page(pid)
+                actual_bytes = disk_page.read(0, PAGE_SIZE)
+                if actual_bytes != bytes(expected_bytes):
+                    validation_errors.append(
+                        f"Page {pid} persistent disk state mismatch against expected committed model."
+                    )
+
+        is_valid = (len(validation_errors) == 0)
+
+        return WorkloadResult(
+            config=config,
+            seed=plan.config.seed,
+            planned_operations=len(plan),
+            executed_operations=executed_operations,
+            transactions_started=len(transactions_started),
+            transactions_committed=len(transactions_committed),
+            transactions_aborted=len(transactions_aborted),
+            transactions_incomplete=len(transactions_incomplete),
+            reads_executed=reads_executed,
+            updates_executed=updates_executed,
+            crash_configured=False,
+            crash_observed=False,
+            is_valid=is_valid,
+            fault_point=None,
+            exit_code=None,
+            recovery_result=None,
+            validation_errors=validation_errors,
+            committed_transactions=transactions_committed,
+            aborted_transactions=transactions_aborted,
+            incomplete_transactions=transactions_incomplete,
+        )
+
+    @classmethod
     def validate_database_state(
         cls,
         db_path: Path,

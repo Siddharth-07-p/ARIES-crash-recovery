@@ -724,3 +724,106 @@ The dedicated Phase 16A test suite resides in [`backend/tests/test_lifespan.py`]
 | `test_05_lifespan_handles_recovery_failure_gracefully` | Corrupted WAL causes clean startup failure without file descriptor leaks | PASSED |
 - **Full Suite Verification**: 281 tests passing (276 existing + 5 Phase 16A lifespan tests).
 - **Frontend Build**: `npm run build` completed with 0 errors (`dist/index.html`, `dist/assets/*`).
+
+---
+
+# Phase 16B: Safe Workload-to-Monitoring Integration — Walkthrough
+
+## Overview
+
+Phase 16B implements a safe, bounded mechanism to trigger synthetic transactional workloads directly against the **same active database instance** managed by FastAPI, and register the outcomes with `monitoring_state` so the live monitoring dashboard immediately displays real execution statistics.
+
+---
+
+## 1. Architecture and Resource Safety
+
+```
+  +-------------------------------------------------------------------------+
+  |                             FastAPI Server                              |
+  |                                                                         |
+  |  POST /api/workload/run                                                 |
+  |             |                                                           |
+  |             v                                                           |
+  |     +----------------+     Already running?                             |
+  |     | Concurrency    |---------------------------> HTTP 409 Conflict    |
+  |     | Guard (Lock)   |                                                  |
+  |     +----------------+                                                  |
+  |             | Not locked (Acquired)                                     |
+  |             v                                                           |
+  |     +----------------+     Subsystems closed?                           |
+  |     | State Check    |---------------------------> HTTP 503 Unavailable |
+  |     +----------------+                                                  |
+  |             | Operational                                               |
+  |             v                                                           |
+  |     +----------------------------------------------------+              |
+  |     | WorkloadExecutor.execute_live()                    |              |
+  |     |                                                    |              |
+  |     |  * Reuses app.state.transaction_manager            |              |
+  |     |  * Reuses app.state.buffer_manager                 |              |
+  |     |  * Reuses app.state.log_manager                    |              |
+  |     |  * Reuses app.state.checkpoint_manager             |              |
+  |     |  * Remaps tx IDs dynamically via tx_map            |              |
+  |     |  * Wraps fetch_page in try/finally to prevent pins |              |
+  |     |  * Flushes buffers via flush_all_pages()           |              |
+  |     |  * Leaves managers OPEN for subsequent requests    |              |
+  |     +----------------------------------------------------+              |
+  |             |                                                           |
+  |             +------------ Validation Failure?                           |
+  |             |                      |                                    |
+  |             |                      v                                    |
+  |             |            HTTP 422 (Not Registered in State)             |
+  |             v                                                           |
+  |     +-----------------------------------------+                         |
+  |     | monitoring_state.register_workload(...) |                         |
+  |     +-----------------------------------------+                         |
+  |             |                                                           |
+  |             v                                                           |
+  |     HTTP 200 OK (WorkloadRunResponse)                                   |
+  |             |                                                           |
+  |             v                                                           |
+  |     Dashboard fetches /api/monitoring/workload                          |
+  |     Displays "Synthetic Workload Summary"                               |
+  +-------------------------------------------------------------------------+
+```
+
+### Key Technical Decisions:
+1. **Zero Resource Duplication**: Avoided instantiating parallel `DiskManager` or `LogManager` instances which would trigger Windows file lock conflicts (`PermissionError` / `Sharing violation`).
+2. **Handle Preservation**: `WorkloadExecutor.execute()` originally called `.close()` on all managers. `execute_live()` executes the workload, validates buffer frame pins, flushes modified pages to disk, and leaves all managers open and operational.
+3. **Transaction ID Mapping (`tx_map`)**: Plans generated by `WorkloadGenerator` number transactions from `1..N`. Live engines generate monotonically increasing IDs (e.g. `1..10`, then `11..20`). `execute_live` dynamically maps plan IDs to actual live transaction IDs so abort rollbacks and CLRs reference the live engine transactions correctly.
+4. **Validation Isolation**: Disk verification compares byte-exact committed state after flushing, while frame pin checking asserts `bm.get_pin_count(page_id) == 0` for all resident frames.
+5. **Non-Blocking Concurrency Control**: An atomic `threading.Lock` immediately rejects simultaneous workloads with HTTP 409 Conflict, preventing interleaved corruption or resource exhaustion.
+
+---
+
+## 2. API Contract & Validation Limits
+
+- **Endpoints**: `POST /api/workload/run` and `POST /api/workload/execute`
+- **Request Limits**:
+  - `num_transactions`: 1 to 100 (default: 10)
+  - `num_pages`: 1 to 32 (default: 4)
+  - `operations_per_transaction`: 1 to 20 (default: 5)
+  - `num_transactions * operations_per_transaction` <= 1000
+  - `commit_ratio + abort_ratio + incomplete_ratio` == 1.0 (within 0.001)
+- **Response**: `WorkloadRunResponse` containing execution counts, transaction classification, validation status, and elapsed duration.
+
+---
+
+## 3. Test Suite Verification
+
+The Phase 16B test suite in [`backend/tests/test_workload_api.py`](file:///c:/Users/siddh/OneDrive/Desktop/ARIES-crash-recovery/backend/tests/test_workload_api.py) validates all 10 core scenarios:
+
+| Test Name | Scenario Verified | Status |
+|---|---|---|
+| `test_01_successful_workload_execution_on_live_database` | Workload executes on active lifespan database, leaving managers open | PASSED |
+| `test_02_workload_result_registered_and_retrievable_via_monitoring` | Result registers with monitoring_state, visible on /workload, /transactions, /wal, /buffer-pool | PASSED |
+| `test_03_repeated_workloads_accumulate_safely` | Consecutive workloads execute without transaction ID collisions; stats accumulate | PASSED |
+| `test_04_execute_alias_endpoint` | POST /api/workload/execute acts as a drop-in alias for /run | PASSED |
+| `test_05_invalid_parameter_bounds_rejected` | Out-of-bounds transactions, pages, operations, ratio sums, and total ops return 422 | PASSED |
+| `test_06_uninitialized_database_returns_503` | Calling endpoint outside lifespan or when database is closed returns 503 | PASSED |
+| `test_07_concurrent_execution_returns_409_conflict` | Concurrent requests are rejected with HTTP 409 Conflict | PASSED |
+| `test_08_validation_failure_handling` | Validation failures return 422 and prevent false success in monitoring state | PASSED |
+| `test_09_internal_execution_failure_handling` | Execution errors return 500 without stack traces and preserve manager health | PASSED |
+| `test_10_recovery_guarantee_after_workload_with_incomplete_transactions` | ARIES recovery cleanly recovers committed winners and uncommitted losers after workload | PASSED |
+
+- **Full Suite Verification**: 291 passed, 3 warnings in 22.12s.
+- **Frontend Production Build**: `npm run build` passed in 7.34s with 0 errors.
